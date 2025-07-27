@@ -223,4 +223,19 @@ class AnalyticsMixin:
         # --- R²-OOS ------------------------------------------------------
         r2 = 1 - ((ytru - yhat)**2).sum() / ((ytru - bench)**2).sum()
 
-        return (r2, ytru, yhat, bench) if return_full else r2
+        return (r2, ytru, yhat, bench) if return_full else r2 
+    
+    
+    def mse_oos(self, cols=None, rmse: bool=False, return_full: bool=False):
+        """
+        테스트 기간 평균 제곱오차(만기별). rmse=True면 제곱근.
+        return_full=True면 (mse, ytrue, yhat) 반환.
+        """
+        yhat, ytru = self._oos_pred_true(cols)
+        err2 = (ytru - yhat) ** 2
+        mse = err2.mean(axis=0)
+        if rmse:
+            mse = np.sqrt(mse)
+        if return_full:
+            return mse, ytru, yhat
+        return mse
