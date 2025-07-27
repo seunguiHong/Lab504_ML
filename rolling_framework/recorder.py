@@ -24,6 +24,7 @@ class Recorder:
     def save_pred(self, ds, y_hat):
         self.oos_pred[ds] = pd.DataFrame([y_hat], index=[ds], columns=self.targets)
 
+    
     # ── 직렬화 / 복원 메서드 ───────────────────────────────
     def dump(self, filepath: str, compress: bool = True):
         """
