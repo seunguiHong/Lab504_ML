@@ -225,17 +225,124 @@ class AnalyticsMixin:
 
         return (r2, ytru, yhat, bench) if return_full else r2 
     
-    
-    def mse_oos(self, cols=None, rmse: bool=False, return_full: bool=False):
+    # --------Temp : recorder.py와 일부 겹치는 문제 / MSE 출력용---------
+
+    def _oos_pred(self, cols=None):
         """
-        테스트 기간 평균 제곱오차(만기별). rmse=True면 제곱근.
-        return_full=True면 (mse, ytrue, yhat) 반환.
+        Recorder(self.rec).oos_pred 에 저장된 테스트기간 예측들을 모아
+        (yhat, ytru) 튜플로 반환.
+          - yhat: pd.DataFrame (index=테스트 날짜, columns=만기)
+          - ytru: pd.DataFrame (동일 index/columns 정렬)
         """
-        yhat, ytru = self._oos_pred_true(cols)
-        err2 = (ytru - yhat) ** 2
-        mse = err2.mean(axis=0)
-        if rmse:
-            mse = np.sqrt(mse)
+        # 1) 컬럼 결정
+        if cols is None:
+            cols = list(self.y.columns)
+        else:
+            cols = list(cols)
+
+        # 2) 날짜별로 recorder에서 꺼내 붙이기
+        frames = []
+        for ds in getattr(self, "test_dates", []):
+            block = getattr(self.rec, "oos_pred", {}).get(ds)
+            if block is None:
+                continue
+
+            # 대부분 block.loc[ds, cols] 가 동작 (Series 또는 1xK DF)
+            row = block.loc[ds, cols] if set(cols).issubset(block.columns) else block.loc[ds]
+
+            # Series → 1xK DF 통일
+            if isinstance(row, pd.Series):
+                row = row.to_frame().T
+
+            # 인덱스(시간) 부여
+            row.index = pd.Index([ds], name=self.y.index.name or "Time")
+            frames.append(row)
+
+        if not frames:
+            raise RuntimeError("Recorder.oos_pred에 테스트 예측이 없습니다. training() 실행 여부를 확인하세요.")
+
+        # 3) 예측/실제 정렬
+        yhat = pd.concat(frames, axis=0).sort_index()
+        ytru = self.y.loc[yhat.index, cols]
+        return yhat, ytru
+
+
+    def _train_stats(self, cols):
+        """테스트 첫 날짜 이전 구간을 train으로 보고 만기별 std/var 계산."""
+        first_test = min(self.test_dates) if hasattr(self, "test_dates") else None
+        if first_test is None:
+            # fallback: 전체에서
+            df_train = self.y.loc[:, cols]
+        else:
+            # 인덱스가 YYYYMM 문자열이라면 사전식 비교로도 정렬 가능(동일 포맷 가정)
+            df_train = self.y.loc[self.y.index < first_test, cols]
+            if df_train.empty:
+                df_train = self.y.loc[:, cols]
+        std = df_train.std(ddof=1)
+        var = df_train.var(ddof=1)
+        return std, var
+
+    def mse_oos(self, cols=None, rmse: bool=False, return_full: bool=False,
+                normalize: str | None = None,  # 'std' | 'var' | 'ratio' | None
+                naive: str = "mean"            # normalize='ratio'일 때 기준
+                ):
+        """
+        테스트 기간 평균제곱오차(만기별).
+          - rmse=True면 제곱근을 취함
+          - normalize:
+              None  : 원래대로 MSE / RMSE
+              'var' : NMSE = MSE / Var(y_train)
+              'std' : NRMSE = RMSE / Std(y_train) (rmse=False이어도 RMSE로 바꿔 std로 나눔)
+              'ratio': MSE / MSE_naive  (naive='mean'이면 훈련구간 평균 예측)
+        return_full=True면 (series, ytrue, yhat) 반환.
+        """
+        # 1) OOS 예측/실제
+        yhat, ytru = self._oos_pred(cols)
+        cols = list(ytru.columns)
+
+        # 2) 기본 MSE/RMSE
+        err = ytru - yhat
+        mse = (err ** 2).mean(axis=0)  # Series (만기별)
+
+        # 3) 정규화 옵션
+        if normalize is None:
+            out = np.sqrt(mse) if rmse else mse
+
+        elif normalize == "var":
+            # NMSE = MSE / Var(y_train)
+            _, var = self._train_stats(cols)
+            out = mse / var
+            if rmse:
+                # 요청이 rmse=True면 NRMSE = sqrt(MSE)/sqrt(Var) 로 반환
+                out = np.sqrt(mse) / np.sqrt(var)
+
+        elif normalize == "std":
+            # NRMSE = RMSE / Std(y_train)
+            std, _ = self._train_stats(cols)
+            out = np.sqrt(mse) / std  # rmse 여부와 무관하게 RMSE로 정규화하는 게 일반적
+
+        elif normalize == "ratio":
+            # 모델 MSE를 '나이브' 대비 비율로
+            if naive == "mean":
+                # 훈련구간 평균(고정)을 예측으로 사용
+                first_test = min(self.test_dates) if hasattr(self, "test_dates") else None
+                if first_test is None:
+                    y_train = self.y.loc[:, cols]
+                else:
+                    y_train = self.y.loc[self.y.index < first_test, cols]
+                    if y_train.empty:
+                        y_train = self.y.loc[:, cols]
+                mu = y_train.mean(axis=0)
+                mse_naive = ((ytru - mu) ** 2).mean(axis=0)
+            else:
+                raise ValueError("naive 옵션은 현재 'mean'만 지원합니다.")
+            out = mse / mse_naive
+            if rmse:
+                out = np.sqrt(mse / mse_naive)
+        else:
+            raise ValueError("normalize must be one of {None,'var','std','ratio'}.")
+
         if return_full:
-            return mse, ytru, yhat
-        return mse
+            return out, ytru, yhat
+        return out
+        
