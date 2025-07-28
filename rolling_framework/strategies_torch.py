@@ -260,11 +260,12 @@ class SafeNetDualLR(NeuralNetRegressor):
     """
     def __init__(self, *args, lr_br1=None, lr_br2=None, lr_head=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.lr_br1 = lr_br1
-        self.lr_br2 = lr_br2
+        self.lr_br1  = lr_br1
+        self.lr_br2  = lr_br2
         self.lr_head = lr_head
 
-    def fit(self, X, y=None, **kw):                         # type: ignore[override]
+    def fit(self, X, y=None, **kw):  # type: ignore[override]
+        import numpy as np, pandas as pd
         if isinstance(X, (pd.DataFrame, pd.Series)):
             X = X.to_numpy(dtype=np.float32, copy=False)
         if isinstance(y, (pd.DataFrame, pd.Series)):
@@ -272,23 +273,31 @@ class SafeNetDualLR(NeuralNetRegressor):
         return super().fit(X, y, **kw)
 
     def initialize_optimizer(self):
-        # 모듈 초기화 먼저
+        # 1) 모듈을 먼저 초기화 (module_ 생성)
         super().initialize_module()
         mdl = self.module_
 
-        # base kwargs (예: weight_decay 등)
+        # 2) skorch가 관리하는 optimizer kwargs 추출
         opt_cls = self.optimizer
-        opt_kw = self._get_params_for_optimizer(opt_cls)
+        named_params = list(mdl.named_parameters())
+        try:
+            # skorch ≥0.13: (optimizer, named_parameters)
+            opt_kw = self._get_params_for_optimizer(opt_cls, named_params)
+        except TypeError:
+            # 구버전 호환
+            opt_kw = self._get_params_for_optimizer(opt_cls)
 
-        # 학습 파라미터 그룹 구성
+        base_lr = opt_kw.pop("lr", 1e-3)
+
+        # 3) 파라미터 그룹 구성 (브랜치별 LR)
         groups = []
         if hasattr(mdl, "br1") and any(p.requires_grad for p in mdl.br1.parameters()):
-            groups.append({"params": mdl.br1.parameters(), "lr": self.lr_br1 or opt_kw.pop("lr", 1e-3)})
+            groups.append({"params": mdl.br1.parameters(), "lr": (self.lr_br1 or base_lr)})
         if hasattr(mdl, "br2"):
-            groups.append({"params": mdl.br2.parameters(), "lr": self.lr_br2 or opt_kw.get("lr", 1e-3)})
-        groups.append({"params": mdl.head.parameters(), "lr": self.lr_head or opt_kw.get("lr", 1e-3)})
+            groups.append({"params": mdl.br2.parameters(), "lr": (self.lr_br2 or base_lr)})
+        groups.append({"params": mdl.head.parameters(), "lr": (self.lr_head or base_lr)})
 
-        # optimizer 생성
+        # 4) optimizer 생성
         self.optimizer_ = opt_cls(groups, **opt_kw)
         return self
 
