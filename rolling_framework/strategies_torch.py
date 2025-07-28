@@ -256,7 +256,7 @@ class PretrainSlope(Callback):
 class SafeNetDualLR(NeuralNetRegressor):
     """
     pandas→float32 변환 + 브랜치별 learning rate 지원
-    GridSearch에서 'dnn__lr_br1', 'dnn__lr_br2', 'dnn__lr_head' 로 튜닝 가능
+    GridSearch에선 'dnn__lr_br1', 'dnn__lr_br2', 'dnn__lr_head'로 튜닝
     """
     def __init__(self, *args, lr_br1=None, lr_br2=None, lr_head=None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -273,32 +273,40 @@ class SafeNetDualLR(NeuralNetRegressor):
         return super().fit(X, y, **kw)
 
     def initialize_optimizer(self):
-        # 1) 모듈을 먼저 초기화 (module_ 생성)
+        # 1) 모듈 초기화(필수) → module_ 생성
         super().initialize_module()
         mdl = self.module_
 
-        # 2) skorch가 관리하는 optimizer kwargs 추출
-        opt_cls = self.optimizer
-        named_params = list(mdl.named_parameters())
-        try:
-            # skorch ≥0.13: (optimizer, named_parameters)
-            opt_kw = self._get_params_for_optimizer(opt_cls, named_params)
-        except TypeError:
-            # 구버전 호환
-            opt_kw = self._get_params_for_optimizer(opt_cls)
+        # 2) skorch 공식 API로 optimizer kwargs 가져오기
+        #    예: {'lr': 0.001, 'weight_decay': 0.0005, ...}
+        opt_kwargs = self.get_params_for('optimizer__').copy()
+        base_lr = opt_kwargs.pop('lr', 1e-3)  # 그룹에 lr 지정 없을 때 기본값
 
-        base_lr = opt_kw.pop("lr", 1e-3)
+        # 3) 파라미터 그룹 구성 (없으면 자동 생략)
+        param_groups = []
+        if hasattr(mdl, 'br1') and any(p.requires_grad for p in mdl.br1.parameters()):
+            param_groups.append({'params': mdl.br1.parameters(),
+                                 'lr': self.lr_br1 if self.lr_br1 is not None else base_lr})
+        if hasattr(mdl, 'br2') and any(p.requires_grad for p in mdl.br2.parameters()):
+            param_groups.append({'params': mdl.br2.parameters(),
+                                 'lr': self.lr_br2 if self.lr_br2 is not None else base_lr})
+        # head는 필수
+        param_groups.append({'params': mdl.head.parameters(),
+                             'lr': self.lr_head if self.lr_head is not None else base_lr})
 
-        # 3) 파라미터 그룹 구성 (브랜치별 LR)
-        groups = []
-        if hasattr(mdl, "br1") and any(p.requires_grad for p in mdl.br1.parameters()):
-            groups.append({"params": mdl.br1.parameters(), "lr": (self.lr_br1 or base_lr)})
-        if hasattr(mdl, "br2"):
-            groups.append({"params": mdl.br2.parameters(), "lr": (self.lr_br2 or base_lr)})
-        groups.append({"params": mdl.head.parameters(), "lr": (self.lr_head or base_lr)})
+        # 4) optimizer class / tuple 처리 (skorch 표준)
+        if isinstance(self.optimizer, tuple):
+            opt_cls, user_kwargs = self.optimizer
+            all_kwargs = {**opt_kwargs, **user_kwargs}
+        else:
+            opt_cls = self.optimizer
+            all_kwargs = opt_kwargs
 
-        # 4) optimizer 생성
-        self.optimizer_ = opt_cls(groups, **opt_kw)
+        # 그룹 lr를 쓸 것이므로 all_kwargs에 lr가 있어도 상관없지만,
+        # 깔끔하게 하려면 제거해도 됩니다 (선택)
+        all_kwargs.pop('lr', None)
+
+        self.optimizer_ = opt_cls(param_groups, **all_kwargs)
         return self
 
     def __getstate__(self):
