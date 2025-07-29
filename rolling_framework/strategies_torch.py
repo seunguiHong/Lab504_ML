@@ -27,6 +27,7 @@ from skorch import NeuralNetRegressor
 from skorch.callbacks import Callback, EarlyStopping
 from skorch.dataset import ValidSplit
 from sklearn.linear_model import LinearRegression
+from skorch.utils import to_device
 
 from .strategies import BaseStrategy          # 기존 파일의 BaseStrategy
 
@@ -145,62 +146,60 @@ from skorch.dataset import ValidSplit
 from skorch.callbacks import Callback, EarlyStopping
 from sklearn.linear_model import LinearRegression
 
-# (1) 작은 유틸: MLP 빌더
-def _mlp(in_dim: int, hidden: Tuple[int, ...], drop: float) -> tuple[nn.Sequential, int]:
+# ────────────── 유틸 함수: 작은 MLP 생성 ──────────────
+def _mlp(in_dim: int, hidden: Tuple[int, ...], drop: float) -> Tuple[nn.Sequential, int]:
     layers, d = [], in_dim
     for h in hidden:
         layers += [nn.Linear(d, h), nn.ReLU(), nn.Dropout(drop)]
         d = h
     return nn.Sequential(*layers), d
 
-# (2) 통합 모듈: Static + Dual
+# ────────────── ① 통합 듀얼 브랜치 MLP ──────────────
 class UnifiedDualMLP(nn.Module):
     """
-    통합 듀얼 브랜치 모듈
-      • static_slope_idx가 있으면: 브랜치1=고정 선형(buffer w_s, b_s)
-      • 없으면: 브랜치1=MLP(hidden1, drop1)
-      • merge ∈ {'concat','sum','gate'}
+    • static_slope_idx 지정 시: branch1 = 고정 선형 (buffer w_s, b_s)
+    • 아니면: branch1 = 작은 MLP(hidden1, drop1)
+    • branch2 = MLP(hidden2, drop2)
+    • merge ∈ {'concat','sum','gate'}
     """
-    def __init__(self,
-                 idx2: List[int],
-                 out_dim: int = 1,
-                 merge: str = "concat",
-                 # learned-branch1
-                 idx1: Optional[List[int]] = None,
-                 hidden1: Tuple[int, ...] = (3,),
-                 drop1: float = 0.0,
-                 # static-branch1
-                 static_slope_idx: Optional[int] = None,
-                 # branch2
-                 hidden2: Tuple[int, ...] = (64,),
-                 drop2: float = 0.0):
+    def __init__(
+        self,
+        idx2: List[int],
+        out_dim: int = 1,
+        merge: str = "concat",
+        idx1: Optional[List[int]] = None,
+        hidden1: Tuple[int, ...] = (3,),
+        drop1: float = 0.0,
+        static_slope_idx: Optional[int] = None,
+        hidden2: Tuple[int, ...] = (64,),
+        drop2: float = 0.0,
+    ):
         super().__init__()
         assert merge in {"concat", "sum", "gate"}
         self.merge = merge
-        self.idx2  = idx2
+        self.idx2 = idx2
         self.static_slope_idx = static_slope_idx
 
-        # branch1
+        # ── branch1 설정 ──
         if static_slope_idx is None:
-            assert idx1 is not None and len(idx1) > 0, "idx1 must be provided for dual-branch mode"
+            assert idx1 and len(idx1) > 0
             self.idx1 = idx1
             self.br1, d1 = _mlp(len(idx1), hidden1, drop1)
             self.is_static = False
         else:
             self.idx1 = None
-            self.register_buffer('w_s', torch.tensor(0., dtype=torch.float32))
-            self.register_buffer('b_s', torch.tensor(0., dtype=torch.float32))
+            self.register_buffer("w_s", torch.tensor(0.0, dtype=torch.float32))
+            self.register_buffer("b_s", torch.tensor(0.0, dtype=torch.float32))
             d1 = 1
             self.is_static = True
 
-        # branch2
+        # ── branch2 ──
         self.br2, d2 = _mlp(len(idx2), hidden2, drop2)
 
-        # merge
+        # ── merge & head ──
         if merge == "concat":
             head_in = d1 + d2
-            self.proj1 = nn.Identity()
-            self.proj2 = nn.Identity()
+            self.proj1 = nn.Identity(); self.proj2 = nn.Identity()
             self.alpha = None
         else:
             d_merge = max(d1, d2)
@@ -213,17 +212,22 @@ class UnifiedDualMLP(nn.Module):
                                   nn.Linear(16, out_dim))
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
-        # branch1
+        # ── 입력 디바이스 맞추기 ──
+        dev = next(self.parameters()).device
+        if X.device != dev:
+            X = X.to(dev, non_blocking=True)
+
+        # ── branch1 ──
         if self.is_static:
-            x_s = X[:, self.static_slope_idx]      # (B,)
-            z1  = (x_s * self.w_s + self.b_s).unsqueeze(1)  # (B,1)
+            x_s = X[:, self.static_slope_idx]  # (B,)
+            z1 = (x_s * self.w_s + self.b_s).unsqueeze(1)
         else:
-            z1 = self.br1(X[:, self.idx1])         # (B,d1)
+            z1 = self.br1(X[:, self.idx1])
 
-        # branch2
-        z2 = self.br2(X[:, self.idx2])             # (B,d2)
+        # ── branch2 ──
+        z2 = self.br2(X[:, self.idx2])
 
-        # merge
+        # ── merge ──
         if self.merge == "concat":
             h = torch.cat([z1, z2], dim=1)
         elif self.merge == "sum":
@@ -234,105 +238,100 @@ class UnifiedDualMLP(nn.Module):
 
         return self.head(h)
 
-# (3) Static 사전회귀 콜백
+# ────────────── ② PretrainSlope 콜백 ──────────────
 class PretrainSlope(Callback):
-    """slope 단일 회귀로 w_s, b_s 초기화 + freeze (static 모드에서만 사용)"""
-    def __init__(self, slope_col_idx: int): self.slope_col_idx = slope_col_idx
+    """
+    static 모드 시 on_train_begin에 slope 회귀 → w_s, b_s 채우고 freeze
+    """
+    def __init__(self, slope_idx: int):
+        self.slope_idx = slope_idx
+
     def on_train_begin(self, net, X=None, y=None, **kwargs):
+        # module_가 준비되지 않았다면 초기화
         if not hasattr(net, "module_") or net.module_ is None:
             net.initialize()
+        mdl = net.module_
+        # 디바이스 맞추기
+        mdl.to(net.device)
+        # numpy 변환
         to_np = lambda a: (a.to_numpy(dtype=np.float32, copy=False)
                            if hasattr(a, "to_numpy")
                            else np.asarray(a, dtype=np.float32))
         Xnp, ynp = to_np(X), to_np(y)
-        lr = LinearRegression().fit(Xnp[:, [self.slope_col_idx]], ynp)
+        lr = LinearRegression().fit(Xnp[:, [self.slope_idx]], ynp)
         w_s = float(lr.coef_.ravel()[0])
         b_s = float(np.mean(lr.intercept_)) if np.ndim(lr.intercept_) else float(lr.intercept_)
-        mdl = net.module_
         mdl.w_s.data.fill_(w_s); mdl.b_s.data.fill_(b_s)
-        for p in [mdl.w_s, mdl.b_s]: p.requires_grad = False
+        for p in (mdl.w_s, mdl.b_s):
+            p.requires_grad = False
 
-# (4) SafeNet + 브랜치별 learning rate
+# ────────────── ③ SafeNetDualLR ──────────────
 class SafeNetDualLR(NeuralNetRegressor):
     """
-    pandas→float32 변환 + 브랜치별 learning rate 지원
-    GridSearch에선 'dnn__lr_br1', 'dnn__lr_br2', 'dnn__lr_head'로 튜닝
+    - pandas→float32 자동 변환
+    - 브랜치별 학습률(lr_br1, lr_br2, lr_head) 지원
+    - y_true를 to_device로 올려서 loss 디바이스 일치 보장
     """
-    def __init__(self, *args, lr_br1=None, lr_br2=None, lr_head=None, **kwargs):
+    def __init__(self, *args,
+                 lr_br1: Optional[float]=None,
+                 lr_br2: Optional[float]=None,
+                 lr_head: Optional[float]=None,
+                 **kwargs):
         super().__init__(*args, **kwargs)
-        self.lr_br1  = lr_br1
-        self.lr_br2  = lr_br2
-        self.lr_head = lr_head
+        self.lr_br1, self.lr_br2, self.lr_head = lr_br1, lr_br2, lr_head
 
-    def fit(self, X, y=None, **kw):  # type: ignore[override]
-        import numpy as np, pandas as pd
-        if isinstance(X, (pd.DataFrame, pd.Series)):
-            X = X.to_numpy(dtype=np.float32, copy=False)
-        if isinstance(y, (pd.DataFrame, pd.Series)):
-            y = y.to_numpy(dtype=np.float32, copy=False)
+    def fit(self, X, y=None, **kw):
+        # pandas → float32 numpy
+        import pandas as _pd, numpy as _np
+        if isinstance(X, (_pd.DataFrame, _pd.Series)):
+            X = X.to_numpy(dtype=_np.float32, copy=False)
+        if isinstance(y, (_pd.DataFrame, _pd.Series)):
+            y = y.to_numpy(dtype=_np.float32, copy=False)
         return super().fit(X, y, **kw)
 
     def initialize_optimizer(self):
-        # 1) 모듈 초기화(필수) → module_ 생성
         super().initialize_module()
         mdl = self.module_
-
-        # 2) skorch 공식 API로 optimizer kwargs 가져오기
-        #    예: {'lr': 0.001, 'weight_decay': 0.0005, ...}
-        opt_kwargs = self.get_params_for('optimizer__').copy()
-        base_lr = opt_kwargs.pop('lr', 1e-3)  # 그룹에 lr 지정 없을 때 기본값
-
-        # 3) 파라미터 그룹 구성 (없으면 자동 생략)
-        param_groups = []
-        if hasattr(mdl, 'br1') and any(p.requires_grad for p in mdl.br1.parameters()):
-            param_groups.append({'params': mdl.br1.parameters(),
-                                 'lr': self.lr_br1 if self.lr_br1 is not None else base_lr})
-        if hasattr(mdl, 'br2') and any(p.requires_grad for p in mdl.br2.parameters()):
-            param_groups.append({'params': mdl.br2.parameters(),
-                                 'lr': self.lr_br2 if self.lr_br2 is not None else base_lr})
-        # head는 필수
-        param_groups.append({'params': mdl.head.parameters(),
-                             'lr': self.lr_head if self.lr_head is not None else base_lr})
-
-        # 4) optimizer class / tuple 처리 (skorch 표준)
-        if isinstance(self.optimizer, tuple):
-            opt_cls, user_kwargs = self.optimizer
-            all_kwargs = {**opt_kwargs, **user_kwargs}
-        else:
-            opt_cls = self.optimizer
-            all_kwargs = opt_kwargs
-
-        # 그룹 lr를 쓸 것이므로 all_kwargs에 lr가 있어도 상관없지만,
-        # 깔끔하게 하려면 제거해도 됩니다 (선택)
-        all_kwargs.pop('lr', None)
-
-        self.optimizer_ = opt_cls(param_groups, **all_kwargs)
+        opt_kwargs = self.get_params_for("optimizer__").copy()
+        base_lr = opt_kwargs.pop("lr", 1e-3)
+        # parameter groups
+        groups = []
+        if hasattr(mdl, "br1") and any(p.requires_grad for p in mdl.br1.parameters()):
+            groups.append({"params": mdl.br1.parameters(),
+                           "lr": self.lr_br1 or base_lr})
+        if hasattr(mdl, "br2") and any(p.requires_grad for p in mdl.br2.parameters()):
+            groups.append({"params": mdl.br2.parameters(),
+                           "lr": self.lr_br2 or base_lr})
+        # head
+        groups.append({"params": mdl.head.parameters(),
+                       "lr": self.lr_head or base_lr})
+        # optimizer 생성
+        opt_cls = self.optimizer if not isinstance(self.optimizer, tuple) else self.optimizer[0]
+        kwargs = self.optimizer[1] if isinstance(self.optimizer, tuple) else opt_kwargs
+        self.optimizer_ = opt_cls(groups, **{k:v for k,v in opt_kwargs.items() if k!="lr"})
         return self
 
+    def infer(self, x, **fit_params):
+        x = to_device(x, self.device)
+        return super().infer(x, **fit_params)
+
+    def get_loss(self, y_pred, y_true, *args, **kwargs):
+        y_true = to_device(y_true, self.device)
+        return super().get_loss(y_pred, y_true, *args, **kwargs)
+
     def __getstate__(self):
-        state = super().__getstate__()
-        for k in ["history","_dataset_train","_dataset_valid","_optimizer","_criterion","_callbacks"]:
-            state.pop(k, None)
-        return state
+        st = super().__getstate__()
+        for k in ["history","_dataset_train","_dataset_valid","_optimizer",
+                  "_criterion","_callbacks"]:
+            st.pop(k, None)
+        return st
 
-# (5) 통합 전략
-from .strategies import BaseStrategy  # 프로젝트 내 BaseStrategy
-
+# ────────────── ④ 통합 전략 ──────────────
 class TorchDualUnifiedStrategy(BaseStrategy):
     """
     option:
-      • Static: {"slope":"slope_col", "grp2":[...], "merge":"concat|sum|gate"}
-      • Dual  : {"grp1":[...],       "grp2":[...], "merge":"concat|sum|gate"}
-    Grid 예시:
-      {
-        "dnn__module__merge": ["concat","sum","gate"],
-        "dnn__module__hidden2": [(32,16),(64,32)],
-        "dnn__module__drop2": [0.0, 0.2],
-        "dnn__lr_br1": [1e-3],      # dual 모드일 때만 유효
-        "dnn__lr_br2": [5e-4,1e-3],
-        "dnn__lr_head": [1e-3],
-        "dnn__optimizer__weight_decay": [0.0, 5e-4],
-      }
+      • Static: {"slope":col, "grp2":[...], "merge":...}
+      • Dual:   {"grp1":[...], "grp2":[...], "merge":...}
     """
     _DEFAULT_GRID = {
         "dnn__module__merge": ["concat","sum","gate"],
@@ -346,64 +345,53 @@ class TorchDualUnifiedStrategy(BaseStrategy):
     def __init__(self, core, option: Dict, params_grid=None):
         super().__init__(core, option, params_grid)
         cols = list(core.X.columns)
-
-        self.is_static = "slope" in option and option.get("slope") is not None
-        self.merge = option.get("merge", "concat")
+        self.is_static = "slope" in option and option["slope"] is not None
+        self.merge     = option.get("merge", "concat")
 
         if self.is_static:
             self.static_slope_idx = cols.index(option["slope"])
             self.idx1 = None
         else:
-            grp1 = option["grp1"]; assert grp1 and isinstance(grp1, (list, tuple))
-            self.idx1 = [cols.index(c) for c in grp1]
-            self.static_slope_idx = None
+            self.idx1 = [cols.index(c) for c in option["grp1"]]
 
-        grp2 = option["grp2"]; assert grp2 and isinstance(grp2, (list, tuple))
-        self.idx2 = [cols.index(c) for c in grp2]
-
-        self.out_dim = 1 if self.core.y.ndim == 1 else self.core.y.shape[1]
+        self.idx2   = [cols.index(c) for c in option["grp2"]]
+        self.out_dim = 1 if core.y.ndim == 1 else core.y.shape[1]
         self.device  = "cuda" if torch.cuda.is_available() else "cpu"
 
     def build_pipeline(self) -> Pipeline:
         net = SafeNetDualLR(
             module                   = UnifiedDualMLP,
-            # 모듈 args
             module__idx2             = self.idx2,
             module__out_dim          = self.out_dim,
             module__merge            = self.merge,
             module__idx1             = self.idx1,
-            module__static_slope_idx = self.static_slope_idx,
-            module__hidden1          = (3,),       # 필요시 grid로
+            module__static_slope_idx = getattr(self, "static_slope_idx", None),
+            module__hidden1          = (3,),
             module__drop1            = 0.0,
             module__hidden2          = (32,16),
             module__drop2            = 0.1,
-            # optimizer & train
             optimizer                = torch.optim.Adam,
-            optimizer__lr            = 1e-3,       # 기본 lr (그룹 lr이 없으면 fallback)
+            optimizer__lr            = 1e-3,
             optimizer__weight_decay  = 0.0,
             criterion                = nn.MSELoss,
             batch_size               = 16,
             max_epochs               = 100,
             train_split              = ValidSplit(0.2, stratified=False),
             callbacks                = (
-                [PretrainSlope(self.static_slope_idx),
-                 EarlyStopping(monitor="valid_loss", patience=10, lower_is_better=True)]
+                [PretrainSlope(self.static_slope_idx), EarlyStopping("valid_loss", patience=10)]
                 if self.is_static else
-                [EarlyStopping(monitor="valid_loss", patience=10, lower_is_better=True)]
+                [EarlyStopping("valid_loss", patience=10)]
             ),
             device                   = self.device,
             verbose                  = 0,
         )
-
         self.grid = getattr(self, "params_grid", None) or self._DEFAULT_GRID
 
         return Pipeline([
-            ("sc", StandardScaler()),
+            ("sc",   StandardScaler()),
             ("to32", FunctionTransformer(
                 lambda z: (z.to_numpy(dtype=np.float32, copy=False)
-                        if isinstance(z, (pd.DataFrame, pd.Series))
-                        else z.astype(np.float32, copy=False)),
-                validate=False
-            )),
-            ("dnn", net),
+                           if hasattr(z, "to_numpy") else z.astype(np.float32)),
+                validate=False)),
+            ("dnn",  net),
         ])
