@@ -398,12 +398,12 @@ class TorchDualUnifiedStrategy(BaseStrategy):
         self.grid = getattr(self, "params_grid", None) or self._DEFAULT_GRID
 
         return Pipeline([
+            ("sc", StandardScaler()),
             ("to32", FunctionTransformer(
                 lambda z: (z.to_numpy(dtype=np.float32, copy=False)
-                           if isinstance(z, (pd.DataFrame, pd.Series))
-                           else z.astype(np.float32, copy=False)),
+                        if isinstance(z, (pd.DataFrame, pd.Series))
+                        else z.astype(np.float32, copy=False)),
                 validate=False
             )),
-            ("sc", StandardScaler()),
             ("dnn", net),
         ])
