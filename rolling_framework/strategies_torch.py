@@ -156,14 +156,9 @@ def _mlp(in_dim: int, hidden: Tuple[int, ...], drop: float) -> Tuple[nn.Sequenti
 
 # ──────────────────────────── ② UnifiedDualMLP ────────────────────────────
 class UnifiedDualMLP(nn.Module):
-    """
-    • static_slope_idx 지정 시: 브랜치1에 1→hidden1 MLP
-    • 지정 안 할 시: dual-branch 모두 learned MLP
-    • merge 방식: concat, sum, gate
-    """
     def __init__(self,
                  idx2: List[int],
-                 out_dim: int,
+                 out_dim: int = 1,
                  merge: str = "concat",
                  # learned-branch1
                  idx1: Optional[List[int]] = None,
@@ -176,55 +171,72 @@ class UnifiedDualMLP(nn.Module):
                  drop2: float = 0.0):
         super().__init__()
         assert merge in {"concat", "sum", "gate"}
-        self.merge            = merge
-        self.idx2             = idx2
+        self.merge = merge
+        self.idx2  = idx2
         self.static_slope_idx = static_slope_idx
-        self.is_static        = static_slope_idx is not None
 
-        # ── branch1: always an MLP, even static mode uses a 1→hidden1 network
-        in1 = 1 if self.is_static else len(idx1)
-        self.br1, d1 = _mlp(in1, hidden1, drop1)
+        # ── branch1 설정 ──────────────────
+        if static_slope_idx is None:
+            # 일반 Dual 모드: idx1 + MLP(hidden1,drop1)
+            assert idx1, "idx1 must be provided in dual mode"
+            self.idx1 = idx1
+            self.br1, d1 = _mlp(len(idx1), hidden1, drop1)
+            self.is_static = False
+        else:
+            # Static 모드: slope→(w·x+b)→히든1 MLP
+            self.idx1 = None
+            # 1) 고정 선형
+            self.register_buffer('w_s', torch.tensor(0., dtype=torch.float32))
+            self.register_buffer('b_s', torch.tensor(0., dtype=torch.float32))
+            # 2) 히든 MLP
+            self.br1, d1 = _mlp(1, hidden1, drop1)
+            self.is_static = True
 
-        # ── branch2
+        # ── branch2 설정 ──────────────────
         self.br2, d2 = _mlp(len(idx2), hidden2, drop2)
 
-        # ── merge prep
+        # ── merge & head ──────────────────
         if merge == "concat":
             head_in = d1 + d2
             self.proj1 = nn.Identity(); self.proj2 = nn.Identity(); self.alpha = None
         else:
             d_merge = max(d1, d2)
-            self.proj1 = (nn.Identity() if d1==d_merge else nn.Linear(d1,d_merge))
-            self.proj2 = (nn.Identity() if d2==d_merge else nn.Linear(d2,d_merge))
+            self.proj1 = nn.Identity() if d1==d_merge else nn.Linear(d1, d_merge)
+            self.proj2 = nn.Identity() if d2==d_merge else nn.Linear(d2, d_merge)
             self.alpha = nn.Parameter(torch.tensor(0.0)) if merge=="gate" else None
             head_in = d_merge
 
-        self.head = nn.Sequential(nn.Linear(head_in,16), nn.ReLU(),
-                                  nn.Linear(16, out_dim))
+        self.head = nn.Sequential(
+            nn.Linear(head_in, 16),
+            nn.ReLU(),
+            nn.Linear(16, out_dim),
+        )
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
+        # → 같은 device 보장
         dev = next(self.parameters()).device
         if X.device != dev:
             X = X.to(dev, non_blocking=True)
 
-        # branch1 input
+        # ── branch1 실행 ─────────────────
         if self.is_static:
-            x1 = X[:, self.static_slope_idx].unsqueeze(1)  # (B,1)
+            x_s = X[:, self.static_slope_idx]                  # (B,)
+            lin = (x_s * self.w_s + self.b_s).unsqueeze(1)     # (B,1)
+            z1  = self.br1(lin)                                # (B,d1)
         else:
-            x1 = X[:, self.idx1]                            # (B,in1)
-        z1 = self.br1(x1)                                  # (B,d1)
+            z1 = self.br1(X[:, self.idx1])                     # (B,d1)
 
-        # branch2
-        z2 = self.br2(X[:, self.idx2])                     # (B,d2)
+        # ── branch2 실행 ─────────────────
+        z2 = self.br2(X[:, self.idx2])                         # (B,d2)
 
-        # merge
+        # ── merge ────────────────────────
         if self.merge == "concat":
             h = torch.cat([z1, z2], dim=1)
         elif self.merge == "sum":
             h = self.proj1(z1) + self.proj2(z2)
         else:  # gate
             a = torch.sigmoid(self.alpha)
-            h = (1-a)*self.proj1(z1) + a*self.proj2(z2)
+            h = (1 - a) * self.proj1(z1) + a * self.proj2(z2)
 
         return self.head(h)
 
@@ -321,11 +333,6 @@ class SafeNetDualLR(NeuralNetRegressor):
 
 # ────────────── ④ 통합 전략 ──────────────
 class TorchDualUnifiedStrategy(BaseStrategy):
-    """
-    option:
-      • Static: {"slope":col, "grp2":[...], "merge":...}
-      • Dual:   {"grp1":[...], "grp2":[...], "merge":...}
-    """
     _DEFAULT_GRID = {
         "dnn__module__merge": ["concat","sum","gate"],
         "dnn__module__hidden2": [(32,16),(64,32)],
@@ -338,6 +345,7 @@ class TorchDualUnifiedStrategy(BaseStrategy):
     def __init__(self, core, option: Dict, params_grid=None):
         super().__init__(core, option, params_grid)
         cols = list(core.X.columns)
+
         self.is_static = "slope" in option and option["slope"] is not None
         self.merge     = option.get("merge", "concat")
 
@@ -345,24 +353,30 @@ class TorchDualUnifiedStrategy(BaseStrategy):
             self.static_slope_idx = cols.index(option["slope"])
             self.idx1 = None
         else:
-            self.idx1 = [cols.index(c) for c in option["grp1"]]
+            grp1 = option["grp1"]
+            self.idx1 = [cols.index(c) for c in grp1]
+            self.static_slope_idx = None
 
-        self.idx2   = [cols.index(c) for c in option["grp2"]]
-        self.out_dim = 1 if core.y.ndim == 1 else core.y.shape[1]
+        grp2 = option["grp2"]
+        self.idx2 = [cols.index(c) for c in grp2]
+
+        self.out_dim = 1 if core.y.ndim==1 else core.y.shape[1]
         self.device  = "cuda" if torch.cuda.is_available() else "cpu"
 
     def build_pipeline(self) -> Pipeline:
         net = SafeNetDualLR(
             module                   = UnifiedDualMLP,
+            # module args
             module__idx2             = self.idx2,
             module__out_dim          = self.out_dim,
             module__merge            = self.merge,
             module__idx1             = self.idx1,
-            module__static_slope_idx = getattr(self, "static_slope_idx", None),
-            module__hidden1          = (3,),
+            module__static_slope_idx = self.static_slope_idx,
+            module__hidden1          = (3,),       # fixed 1 hidden
             module__drop1            = 0.0,
-            module__hidden2          = (32,16),
-            module__drop2            = 0.1,
+            module__hidden2          = (64,),
+            module__drop2            = 0.2,
+            # optimizer & train
             optimizer                = torch.optim.Adam,
             optimizer__lr            = 1e-3,
             optimizer__weight_decay  = 0.0,
@@ -370,21 +384,25 @@ class TorchDualUnifiedStrategy(BaseStrategy):
             batch_size               = 16,
             max_epochs               = 100,
             train_split              = ValidSplit(0.2, stratified=False),
-            callbacks                = (
-                [PretrainSlope(self.static_slope_idx), EarlyStopping("valid_loss", patience=10)]
+            callbacks = (
+                [PretrainSlope(self.static_slope_idx),
+                 EarlyStopping(monitor="valid_loss", patience=10, lower_is_better=True)]
                 if self.is_static else
-                [EarlyStopping("valid_loss", patience=10)]
+                [EarlyStopping(monitor="valid_loss", patience=10, lower_is_better=True)]
             ),
-            device                   = self.device,
-            verbose                  = 0,
+            device   = self.device,
+            verbose  = 0,
         )
+
         self.grid = getattr(self, "params_grid", None) or self._DEFAULT_GRID
 
         return Pipeline([
             ("sc",   StandardScaler()),
             ("to32", FunctionTransformer(
                 lambda z: (z.to_numpy(dtype=np.float32, copy=False)
-                           if hasattr(z, "to_numpy") else z.astype(np.float32)),
-                validate=False)),
+                           if isinstance(z, (pd.DataFrame, pd.Series))
+                           else z.astype(np.float32, copy=False)),
+                validate=False
+            )),
             ("dnn",  net),
         ])
