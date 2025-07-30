@@ -282,7 +282,7 @@ class AnalyticsMixin:
         var = df_train.var(ddof=1)
         return std, var
 
-    def mse_oos(self, cols=None, rmse: bool=False, return_full: bool=False,
+    def MSEOOS(self, cols=None, rmse: bool=False, return_full: bool=False,
                 normalize: str | None = None,  # 'std' | 'var' | 'ratio' | None
                 naive: str = "mean"            # normalize='ratio'일 때 기준
                 ):
