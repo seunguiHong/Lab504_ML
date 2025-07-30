@@ -154,116 +154,109 @@ def _mlp(in_dim: int, hidden: Tuple[int, ...], drop: float) -> Tuple[nn.Sequenti
         d = h
     return nn.Sequential(*layers), d
 
-# ────────────── ① 통합 듀얼 브랜치 MLP ──────────────
+# ──────────────────────────── ② UnifiedDualMLP ────────────────────────────
 class UnifiedDualMLP(nn.Module):
     """
-    • static_slope_idx 지정 시: branch1 = 고정 선형 (buffer w_s, b_s)
-    • 아니면: branch1 = 작은 MLP(hidden1, drop1)
-    • branch2 = MLP(hidden2, drop2)
-    • merge ∈ {'concat','sum','gate'}
+    • static_slope_idx 지정 시: 브랜치1에 1→hidden1 MLP
+    • 지정 안 할 시: dual-branch 모두 learned MLP
+    • merge 방식: concat, sum, gate
     """
-    def __init__(
-        self,
-        idx2: List[int],
-        out_dim: int = 1,
-        merge: str = "concat",
-        idx1: Optional[List[int]] = None,
-        hidden1: Tuple[int, ...] = (3,),
-        drop1: float = 0.0,
-        static_slope_idx: Optional[int] = None,
-        hidden2: Tuple[int, ...] = (64,),
-        drop2: float = 0.0,
-    ):
+    def __init__(self,
+                 idx2: List[int],
+                 out_dim: int,
+                 merge: str = "concat",
+                 # learned-branch1
+                 idx1: Optional[List[int]] = None,
+                 hidden1: Tuple[int, ...] = (3,),
+                 drop1: float = 0.0,
+                 # static-branch1
+                 static_slope_idx: Optional[int] = None,
+                 # branch2
+                 hidden2: Tuple[int, ...] = (64,),
+                 drop2: float = 0.0):
         super().__init__()
         assert merge in {"concat", "sum", "gate"}
-        self.merge = merge
-        self.idx2 = idx2
+        self.merge            = merge
+        self.idx2             = idx2
         self.static_slope_idx = static_slope_idx
+        self.is_static        = static_slope_idx is not None
 
-        # ── branch1 설정 ──
-        if static_slope_idx is None:
-            assert idx1 and len(idx1) > 0
-            self.idx1 = idx1
-            self.br1, d1 = _mlp(len(idx1), hidden1, drop1)
-            self.is_static = False
-        else:
-            self.idx1 = None
-            self.register_buffer("w_s", torch.tensor(0.0, dtype=torch.float32))
-            self.register_buffer("b_s", torch.tensor(0.0, dtype=torch.float32))
-            d1 = 1
-            self.is_static = True
+        # ── branch1: always an MLP, even static mode uses a 1→hidden1 network
+        in1 = 1 if self.is_static else len(idx1)
+        self.br1, d1 = _mlp(in1, hidden1, drop1)
 
-        # ── branch2 ──
+        # ── branch2
         self.br2, d2 = _mlp(len(idx2), hidden2, drop2)
 
-        # ── merge & head ──
+        # ── merge prep
         if merge == "concat":
             head_in = d1 + d2
-            self.proj1 = nn.Identity(); self.proj2 = nn.Identity()
-            self.alpha = None
+            self.proj1 = nn.Identity(); self.proj2 = nn.Identity(); self.alpha = None
         else:
             d_merge = max(d1, d2)
-            self.proj1 = nn.Identity() if d1 == d_merge else nn.Linear(d1, d_merge)
-            self.proj2 = nn.Identity() if d2 == d_merge else nn.Linear(d2, d_merge)
-            self.alpha = nn.Parameter(torch.tensor(0.0)) if merge == "gate" else None
+            self.proj1 = (nn.Identity() if d1==d_merge else nn.Linear(d1,d_merge))
+            self.proj2 = (nn.Identity() if d2==d_merge else nn.Linear(d2,d_merge))
+            self.alpha = nn.Parameter(torch.tensor(0.0)) if merge=="gate" else None
             head_in = d_merge
 
-        self.head = nn.Sequential(nn.Linear(head_in, 16), nn.ReLU(),
+        self.head = nn.Sequential(nn.Linear(head_in,16), nn.ReLU(),
                                   nn.Linear(16, out_dim))
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
-        # ── 입력 디바이스 맞추기 ──
         dev = next(self.parameters()).device
         if X.device != dev:
             X = X.to(dev, non_blocking=True)
 
-        # ── branch1 ──
+        # branch1 input
         if self.is_static:
-            x_s = X[:, self.static_slope_idx]  # (B,)
-            z1 = (x_s * self.w_s + self.b_s).unsqueeze(1)
+            x1 = X[:, self.static_slope_idx].unsqueeze(1)  # (B,1)
         else:
-            z1 = self.br1(X[:, self.idx1])
+            x1 = X[:, self.idx1]                            # (B,in1)
+        z1 = self.br1(x1)                                  # (B,d1)
 
-        # ── branch2 ──
-        z2 = self.br2(X[:, self.idx2])
+        # branch2
+        z2 = self.br2(X[:, self.idx2])                     # (B,d2)
 
-        # ── merge ──
+        # merge
         if self.merge == "concat":
             h = torch.cat([z1, z2], dim=1)
         elif self.merge == "sum":
             h = self.proj1(z1) + self.proj2(z2)
         else:  # gate
             a = torch.sigmoid(self.alpha)
-            h = (1 - a) * self.proj1(z1) + a * self.proj2(z2)
+            h = (1-a)*self.proj1(z1) + a*self.proj2(z2)
 
         return self.head(h)
 
-# ────────────── ② PretrainSlope 콜백 ──────────────
+# ────────────────────────────── ③ PretrainSlope ────────────────────────────
 class PretrainSlope(Callback):
-    """
-    static 모드 시 on_train_begin에 slope 회귀 → w_s, b_s 채우고 freeze
-    """
-    def __init__(self, slope_idx: int):
-        self.slope_idx = slope_idx
+    """Static 모드에서 branch1 MLP의 첫 Linear 레이어만 미리 회귀→freeze"""
+    def __init__(self, slope_col_idx: int):
+        self.slope_col_idx = slope_col_idx
 
     def on_train_begin(self, net, X=None, y=None, **kwargs):
-        # module_가 준비되지 않았다면 초기화
+        # ensure module_ exists
         if not hasattr(net, "module_") or net.module_ is None:
             net.initialize()
-        mdl = net.module_
-        # 디바이스 맞추기
-        mdl.to(net.device)
-        # numpy 변환
+
+        # Data → numpy
         to_np = lambda a: (a.to_numpy(dtype=np.float32, copy=False)
-                           if hasattr(a, "to_numpy")
-                           else np.asarray(a, dtype=np.float32))
+                          if hasattr(a, "to_numpy") else np.asarray(a, dtype=np.float32))
         Xnp, ynp = to_np(X), to_np(y)
-        lr = LinearRegression().fit(Xnp[:, [self.slope_idx]], ynp)
-        w_s = float(lr.coef_.ravel()[0])
-        b_s = float(np.mean(lr.intercept_)) if np.ndim(lr.intercept_) else float(lr.intercept_)
-        mdl.w_s.data.fill_(w_s); mdl.b_s.data.fill_(b_s)
-        for p in (mdl.w_s, mdl.b_s):
-            p.requires_grad = False
+
+        # 단일 slope 회귀
+        lr = LinearRegression().fit(Xnp[:, [self.slope_col_idx]], ynp)
+        w_lin = float(lr.coef_.ravel()[0])
+        b_lin = float(lr.intercept_.ravel()[0] if np.ndim(lr.intercept_)>0 else lr.intercept_)
+
+        mdl = net.module_
+        # 첫 Linear 레이어 (br1[0])에 값 채워넣고 freeze
+        first_lin = mdl.br1[0]
+        first_lin.weight.data.fill_(w_lin)
+        first_lin.bias.data.fill_(b_lin)
+        first_lin.weight.requires_grad = False
+        first_lin.bias.requires_grad   = False
+
 
 # ────────────── ③ SafeNetDualLR ──────────────
 class SafeNetDualLR(NeuralNetRegressor):
