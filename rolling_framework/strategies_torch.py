@@ -8,12 +8,13 @@ PyTorch-기반 전략 모음
 • TorchDNNDualStrategy        : 두 Feature-그룹을 별도 MLP → 결합
 
 • 0731 Version : 이건 듀얼 브랜치 전략 모듈이며 추가로 pretaied slope를 지원합니다.
-• 새 연구를 위해서 direct mapping structure를 위해서 main branch를 바꿉니다. 
-나중에 쓰겠죠 뭐. 
+• 새 연구를 위해서 direct mapping structure를 위해서 main branch를 바꿉니다.
+──────────────────────────────────────────────────────────────────── 
 ────────────────────────────────────────────────────────────
 """
 
 from __future__ import annotations
+
 
 # ─────────────────────────  공통 IMPORT  ─────────────────────────
 import copy
