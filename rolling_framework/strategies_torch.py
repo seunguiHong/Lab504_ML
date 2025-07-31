@@ -364,6 +364,8 @@ class TorchMultiBranchStrategy(BaseStrategy):
 
     def __init__(self, core, option: Dict, params_grid=None):
         super().__init__(core, option, params_grid)
+        self.option = option or {}
+        self.log_direct = bool(self.option.get("log_direct", False))
         cols_X = list(core.X.columns)
         cols_y = list(core.y.columns) if core.y.ndim > 1 else [core.y.name]
         self.n_out = len(cols_y)
@@ -425,14 +427,24 @@ class TorchMultiBranchStrategy(BaseStrategy):
         )
 
         # 학습 전 로그 확인 : Default False (Just for Checking, Can eliminate later)
-        if self.option.get("log_direct", False):
-            cols_X = list(self.core.X.columns)
-            cols_y = list(self.core.y.columns) if self.core.y.ndim > 1 else [self.core.y.name]
-            pairs = [(cols_X[i], cols_y[j]) for i, j in zip(self.direct_in_idx, self.direct_out_idx)]
-            print("\n[DirectMap: before fit]")
-            print("  in_idx :", self.direct_in_idx)
-            print("  out_idx:", self.direct_out_idx)
-            print("  pairs  :", pairs, "\n")
+        if self.log_direct:
+            # X, y 컬럼 이름 안전하게 수집 (y가 Series/DF 모두 대응)
+            xcols = list(self.core.X.columns)
+            ycols = list(self.core.y.columns) if getattr(self.core.y, "ndim", 1) > 1 else [self.core.y.name]
+
+            # in/out 인덱스 길이 불일치 안전 체크
+            if len(self.direct_in_idx) != len(self.direct_out_idx):
+                print("[DirectMap] WARNING: len(direct_in_idx) != len(direct_out_idx)")
+                print("  in_idx :", self.direct_in_idx)
+                print("  out_idx:", self.direct_out_idx)
+            else:
+                pairs = [(xcols[i], ycols[j]) for i, j in zip(self.direct_in_idx, self.direct_out_idx)]
+                if not pairs:
+                    print("[DirectMap] (none)")
+                else:
+                    print(f"[DirectMap] {len(pairs)} pair(s):")
+                    for (xin, yout), i, j in zip(pairs, self.direct_in_idx, self.direct_out_idx):
+                        print(f"  {i:>3} ({xin})  →  {j:>3} ({yout})")
         #--------
 
         self.grid = getattr(self, "params_grid", None) or self._DEFAULT_GRID
