@@ -166,7 +166,7 @@ class UnifiedDualMLP(nn.Module):
     def __init__(self,
         idx2: list[int],
         out_dim: int = 1,
-        merge: str = "concat",
+        merge: str = "gate",
         *,
         # Dual-branch args
         idx1: list[int] | None = None,
