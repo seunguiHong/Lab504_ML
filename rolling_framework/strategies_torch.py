@@ -3,12 +3,11 @@ PyTorch-기반 전략 모음
 ────────────────────────────────────────────────────────────────────
 • TorchMLP                    : 단순 feed-forward MLP
 • TorchDNNStrategy            : 개별 MLP (GridSearch 대상)
-• NetEnsemble                 : 여러 seed → valid_loss Top-k 평균
-• TorchDNNEnsembleStrategy    : NetEnsemble 래퍼
-• TorchDNNDualStrategy        : 두 Feature-그룹을 별도 MLP → 결합
+• TorchUnifiedStrategy       : N branch MLP + Direct Version
 """
 
 from __future__ import annotations
+from .strategies import BaseStrategy          # 기존 파일의 BaseStrategy
 
 # ─────────────────────────  공통 IMPORT  ─────────────────────────
 import copy
@@ -28,9 +27,6 @@ from skorch.callbacks import Callback, EarlyStopping
 from skorch.dataset import ValidSplit
 from sklearn.linear_model import LinearRegression
 from skorch.utils import to_device
-
-from .strategies import BaseStrategy          # 기존 파일의 BaseStrategy
-
 # ─────────── ① MLP 모듈 ───────────
 class TorchMLP(nn.Module):
     """Multi-layer perceptron (ReLU + Dropout)."""
@@ -131,278 +127,325 @@ class TorchDNNStrategy(BaseStrategy):
         self.grid = getattr(self, "params_grid", None) or self._DEFAULT_GRID
         return pipe
 
-
-#-------------Unified Dual (Static + Dual-branch) Strategy----------------
 # ─────────────────────────────────────────────────────────────────────────────
-# Unified Dual (Static + Dual-branch w/ per-branch LR)
+# Direct Mapping + Pretrained OLS + N Branch (Gate merge)
 # ─────────────────────────────────────────────────────────────────────────────
-from typing import List, Tuple, Optional, Dict
-import numpy as np, pandas as pd, torch
+from typing import List, Dict, Tuple, Optional
+import numpy as np
+import pandas as pd
+import torch
 import torch.nn as nn
+
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, StandardScaler
-from skorch import NeuralNetRegressor
-from skorch.dataset import ValidSplit
-from skorch.callbacks import Callback, EarlyStopping
 from sklearn.linear_model import LinearRegression
 
-# ────────────── 유틸 함수: 작은 MLP 생성 ──────────────
-def _mlp(in_dim: int, hidden: Tuple[int, ...], drop: float) -> Tuple[nn.Sequential, int]:
-    layers, d = [], in_dim
+from skorch import NeuralNetRegressor
+from skorch.callbacks import Callback, EarlyStopping
+from skorch.dataset import ValidSplit
+from skorch.utils import to_device
+
+from .strategies import BaseStrategy  # ← 꼭 존재해야 함
+
+
+# MLP 유틸
+def _mlp_with_dim(in_dim: int, hidden: Tuple[int, ...], drop: float) -> Tuple[nn.Sequential, int]:
+    layers: List[nn.Module] = []
+    d = in_dim
     for h in hidden:
         layers += [nn.Linear(d, h), nn.ReLU(), nn.Dropout(drop)]
         d = h
-    return nn.Sequential(*layers), d
+    return nn.Sequential(*layers), (d if hidden else in_dim)
 
-# ─────────── ② Static + Dual 통합 모듈 ───────────
-class UnifiedDualMLP(nn.Module):
-    """
-    • merge in {'concat','sum','gate'}  
-    • Dual 모드: idx1, MLP(hidden1)-> z1  
-    • Static 모드: slope 고정(w·x+b) -> MLP(hidden1)-> z1  
-    • branch2: idx2, MLP(hidden2)-> z2  
-    • merge -> head
-    """
-    def __init__(self,
-        idx2: list[int],
-        out_dim: int = 1,
-        merge: str = "gate",
-        *,
-        # Dual-branch args
-        idx1: list[int] | None = None,
-        hidden1: tuple[int, ...] = (3,),
-        drop1: float = 0.0,
-        # Static-branch args
-        static_slope_idx: int | None = None,
-        # branch2 args
-        hidden2: tuple[int, ...] = (64,),
-        drop2: float = 0.0,
+
+# Direct map OLS 초기화
+class PretrainDirectMap(Callback):
+    def on_train_begin(self, net, X=None, y=None, **kwargs):
+        if not hasattr(net, "module_") or net.module_ is None:
+            net.initialize()
+        mdl = net.module_
+
+        if mdl.direct_in_idx is None or len(mdl.direct_in_idx) == 0:
+            return
+
+        def _to_np(a):
+            if hasattr(a, "to_numpy"):
+                return a.to_numpy(dtype=np.float32, copy=False)
+            return np.asarray(a, dtype=np.float32)
+
+        Xnp, ynp = _to_np(X), _to_np(y)
+        # 단일 타깃 대비(선택)
+        y2d = ynp if ynp.ndim == 2 else ynp.reshape(-1, 1)
+
+        M = len(mdl.direct_in_idx)
+        for j in range(M):
+            in_j  = mdl.direct_in_idx[j]
+            out_j = mdl.direct_out_idx[j]
+            xj = Xnp[:, [in_j]]
+            yj = y2d[:, out_j]
+            lr = LinearRegression().fit(xj, yj)
+            w, b = float(lr.coef_.ravel()[0]), float(lr.intercept_)
+            with torch.no_grad():
+                mdl.w_direct.data[j] = w
+                mdl.b_direct.data[j] = b
+
+        if mdl.freeze_direct:
+            mdl.w_direct.requires_grad_(False)
+            mdl.b_direct.requires_grad_(False)
+
+
+# N-Branch + Gate + Head + Direct Residual
+class MultiBranchNet(nn.Module):
+    def __init__(
+        self,
+        branches: List[Dict],
+        n_out: int,
+        direct_in_idx: Optional[List[int]] = None,
+        direct_out_idx: Optional[List[int]] = None,
+        freeze_direct: bool = False,
+        d_merge: Optional[int] = None,
+        head_hidden: int = 16,
+        head_drop: float = 0.0,
     ):
         super().__init__()
-        assert merge in {"concat","sum","gate"}
-        self.merge = merge
-        self.idx2  = idx2
-        self.is_static = static_slope_idx is not None
+        assert len(branches) >= 1, "at least one branch is required"
+        self.n_out = n_out
+        self.freeze_direct = freeze_direct
 
-        # ── branch1 설정 ──────────────────
-        if self.is_static:
-            # Static 모드: slope 고정 → 히든 MLP
-            self.static_slope_idx = static_slope_idx
-            self.register_buffer('w_s', torch.tensor(0.,dtype=torch.float32))
-            self.register_buffer('b_s', torch.tensor(0.,dtype=torch.float32))
-            # slope→(w·x+b) 출력 → br1(hidden1) 처리
-            self.idx1 = None
-            self.br1, d1 = _mlp(1, hidden1, drop1)
-        else:
-            # Dual 모드: idx1 리스트 → br1(hidden1)
-            assert idx1, "dual 모드에서는 idx1이 필요합니다"
-            self.idx1 = idx1
-            self.br1, d1 = _mlp(len(idx1), hidden1, drop1)
+        # branches
+        self.branch_idx: List[List[int]] = []
+        encoders: List[nn.Sequential] = []
+        out_dims: List[int] = []
+        for br in branches:
+            idx   = br["idx"]
+            hid   = tuple(br.get("hidden", (32, 16)))
+            drop  = float(br.get("drop", 0.1))
+            enc, d_out = _mlp_with_dim(len(idx), hid, drop)
+            encoders.append(enc)
+            self.branch_idx.append(idx)
+            out_dims.append(d_out)
+        self.branch_encoders = nn.ModuleList(encoders)
 
-        # ── branch2 설정 ──────────────────
-        self.br2, d2 = _mlp(len(idx2), hidden2, drop2)
+        # merge proj
+        self.d_merge = d_merge if d_merge is not None else int(max(out_dims))
+        projs = []
+        for d in out_dims:
+            projs.append(nn.Identity() if d == self.d_merge else nn.Linear(d, self.d_merge))
+        self.branch_projs = nn.ModuleList(projs)
 
-        # ── merge & head 설정 ─────────────
-        if merge == "concat":
-            head_in = d1 + d2
-            self.proj1 = nn.Identity()
-            self.proj2 = nn.Identity()
-            self.alpha = None
-        else:
-            d_merge = max(d1, d2)
-            self.proj1 = nn.Identity() if d1==d_merge else nn.Linear(d1, d_merge)
-            self.proj2 = nn.Identity() if d2==d_merge else nn.Linear(d2, d_merge)
-            self.alpha = nn.Parameter(torch.tensor(0.0)) if merge=="gate" else None
-            head_in = d_merge
+        # gate (global, input-independent)
+        self.alpha = nn.Parameter(torch.zeros(len(branches)))
 
+        # head
         self.head = nn.Sequential(
-            nn.Linear(head_in, 16), nn.ReLU(),
-            nn.Linear(16, out_dim),
+            nn.Linear(self.d_merge, head_hidden), nn.ReLU(), nn.Dropout(head_drop),
+            nn.Linear(head_hidden, n_out),
         )
 
+        # direct map
+        self.direct_in_idx  = list(direct_in_idx or [])
+        self.direct_out_idx = list(direct_out_idx or [])
+        if len(self.direct_in_idx) != len(self.direct_out_idx):
+            raise ValueError("direct_in_idx와 direct_out_idx 길이가 같아야 합니다.")
+
+        if len(self.direct_in_idx) > 0:
+            M = len(self.direct_in_idx)
+            self.w_direct = nn.Parameter(torch.zeros(M, dtype=torch.float32), requires_grad=not self.freeze_direct)
+            self.b_direct = nn.Parameter(torch.zeros(M, dtype=torch.float32), requires_grad=not self.freeze_direct)
+        else:
+            self.w_direct = None
+            self.b_direct = None
+
     def forward(self, X: torch.Tensor) -> torch.Tensor:
-        # → device 통일
         dev = next(self.parameters()).device
         if X.device != dev:
             X = X.to(dev, non_blocking=True)
 
-        # branch1
-        if self.is_static:
-            x0 = X[:, self.static_slope_idx].unsqueeze(1)
-            z1 = self.br1(x0 * self.w_s + self.b_s)
-        else:
-            z1 = self.br1(X[:, self.idx1])
+        # branches → proj → stack
+        zs: List[torch.Tensor] = []
+        for enc, proj, idx in zip(self.branch_encoders, self.branch_projs, self.branch_idx):
+            zi = proj(enc(X[:, idx]))                  # (B, d_merge)
+            zs.append(zi)
+        w = torch.softmax(self.alpha, dim=0)           # (R,)
+        h = torch.stack(zs, dim=0)                     # (R, B, d_merge)
+        h = torch.einsum("r, rbd -> bd", w, h)         # (B, d_merge)
 
-        # branch2
-        z2 = self.br2(X[:, self.idx2])
+        y_head = self.head(h)                          # (B, n_out)
 
-        # merge
-        if self.merge == "concat":
-            h = torch.cat([z1, z2], dim=1)
-        elif self.merge == "sum":
-            h = self.proj1(z1) + self.proj2(z2)
-        else:  # gate
-            a = torch.sigmoid(self.alpha)
-            h = (1 - a) * self.proj1(z1) + a * self.proj2(z2)
+        # direct residual
+        if self.w_direct is not None and len(self.direct_in_idx) > 0:
+            Xsel = X[:, self.direct_in_idx]            # (B, M)
+            z = Xsel * self.w_direct + self.b_direct   # (B, M)
+            y_direct = X.new_zeros(X.shape[0], self.n_out)
+            out_idx = torch.tensor(self.direct_out_idx, device=X.device, dtype=torch.long)
+            y_direct.index_copy_(1, out_idx, z)
+            return y_head + y_direct
 
-        return self.head(h)
+        return y_head
 
-# ─────────── ③ Static 사전회귀 콜백 ───────────
-class PretrainSlope(Callback):
-    """Static 모드에서만, slope 단일 회귀로 w_s/b_s 초기화 + freeze."""
-    def __init__(self, slope_col_idx: int):
-        super().__init__()
-        self.slope_col_idx = slope_col_idx
 
-    def on_train_begin(self, net, X=None, y=None, **kwargs):
-        if not hasattr(net, "module_") or net.module_ is None:
-            net.initialize()
-        to_np = lambda a: (
-            a.to_numpy(dtype=np.float32, copy=False)
-            if hasattr(a, "to_numpy") else np.asarray(a, dtype=np.float32)
-        )
-        Xnp, ynp = to_np(X), to_np(y)
-        lr = LinearRegression().fit(Xnp[:, [self.slope_col_idx]], ynp)
-        w, b = float(lr.coef_.ravel()[0]), float(np.atleast_1d(lr.intercept_)[0])
-        mdl = net.module_
-        mdl.w_s.data.fill_(w)
-        mdl.b_s.data.fill_(b)
-        for p in (mdl.w_s, mdl.b_s):
-            p.requires_grad = False
-
-# ────────────── ③ SafeNetDualLR ──────────────
-class SafeNetDualLR(NeuralNetRegressor):
-    """
-    - pandas→float32 자동 변환
-    - 브랜치별 학습률(lr_br1, lr_br2, lr_head) 지원
-    - y_true를 to_device로 올려서 loss 디바이스 일치 보장
-    """
-    def __init__(self, *args,
-                 lr_br1: Optional[float]=None,
-                 lr_br2: Optional[float]=None,
-                 lr_head: Optional[float]=None,
+# Skorch 래퍼: 그룹별/헤드/직결 학습률
+class SafeNetNBranchLR(NeuralNetRegressor):
+    def __init__(self, *args, lr_br: Optional[List[float]] = None,
+                 lr_head: Optional[float] = None,
+                 lr_direct: Optional[float] = None,
                  **kwargs):
         super().__init__(*args, **kwargs)
-        self.lr_br1, self.lr_br2, self.lr_head = lr_br1, lr_br2, lr_head
+        self.lr_br     = lr_br
+        self.lr_head   = lr_head
+        self.lr_direct = lr_direct
 
-    def fit(self, X, y=None, **kw):
-        # pandas → float32 numpy
-        import pandas as _pd, numpy as _np
-        if isinstance(X, (_pd.DataFrame, _pd.Series)):
-            X = X.to_numpy(dtype=_np.float32, copy=False)
-        if isinstance(y, (_pd.DataFrame, _pd.Series)):
-            y = y.to_numpy(dtype=_np.float32, copy=False)
+    def fit(self, X, y=None, **kw):  # pandas→float32
+        if isinstance(X, (pd.DataFrame, pd.Series)):
+            X = X.to_numpy(dtype=np.float32, copy=False)
+        if isinstance(y, (pd.DataFrame, pd.Series)):
+            y = y.to_numpy(dtype=np.float32, copy=False)
         return super().fit(X, y, **kw)
 
     def initialize_optimizer(self):
         super().initialize_module()
-        mdl = self.module_
-        opt_kwargs = self.get_params_for("optimizer__").copy()
-        base_lr = opt_kwargs.pop("lr", 1e-3)
-        # parameter groups
+        mdl: MultiBranchNet = self.module_  # type: ignore[assignment]
+
+        opt_kw = self.get_params_for("optimizer__").copy()
+        base_lr = opt_kw.pop("lr", 1e-3)
+
         groups = []
-        if hasattr(mdl, "br1") and any(p.requires_grad for p in mdl.br1.parameters()):
-            groups.append({"params": mdl.br1.parameters(),
-                           "lr": self.lr_br1 or base_lr})
-        if hasattr(mdl, "br2") and any(p.requires_grad for p in mdl.br2.parameters()):
-            groups.append({"params": mdl.br2.parameters(),
-                           "lr": self.lr_br2 or base_lr})
-        # head
-        groups.append({"params": mdl.head.parameters(),
-                       "lr": self.lr_head or base_lr})
-        # optimizer 생성
-        opt_cls = self.optimizer if not isinstance(self.optimizer, tuple) else self.optimizer[0]
-        kwargs = self.optimizer[1] if isinstance(self.optimizer, tuple) else opt_kwargs
-        self.optimizer_ = opt_cls(groups, **{k:v for k,v in opt_kwargs.items() if k!="lr"})
+        # branches
+        n_br = len(mdl.branch_encoders)
+        lrs = self.lr_br if (self.lr_br and len(self.lr_br) > 0) else [base_lr] * n_br
+        if len(lrs) == 1 and n_br > 1:
+            lrs = lrs * n_br
+        for i in range(n_br):
+            params_i = list(mdl.branch_encoders[i].parameters()) + list(mdl.branch_projs[i].parameters())
+            if params_i:
+                groups.append({"params": params_i, "lr": float(lrs[i])})
+
+        # head + gate(alpha)
+        head_params = list(mdl.head.parameters()) + [mdl.alpha]
+        groups.append({"params": head_params, "lr": float(self.lr_head or base_lr)})
+
+        # direct (동결 아닐 때만)
+        if (mdl.w_direct is not None) and (not mdl.freeze_direct):
+            groups.append({"params": [mdl.w_direct, mdl.b_direct],
+                           "lr": float(self.lr_direct or base_lr)})
+
+        if isinstance(self.optimizer, tuple):
+            opt_cls, user_kw = self.optimizer
+            all_kw = {**opt_kw, **user_kw}
+        else:
+            opt_cls = self.optimizer
+            all_kw = opt_kw
+        all_kw.pop("lr", None)
+
+        self.optimizer_ = opt_cls(groups, **all_kw)
         return self
+
+    def __getstate__(self):
+        state = super().__getstate__()
+        for k in ["history", "_dataset_train", "_dataset_valid", "_optimizer", "_criterion", "_callbacks"]:
+            state.pop(k, None)
+        return state
 
     def infer(self, x, **fit_params):
         x = to_device(x, self.device)
         return super().infer(x, **fit_params)
 
-    def get_loss(self, y_pred, y_true, *args, **kwargs):
-        y_true = to_device(y_true, self.device)
-        return super().get_loss(y_pred, y_true, *args, **kwargs)
 
-    def __getstate__(self):
-        st = super().__getstate__()
-        for k in ["history","_dataset_train","_dataset_valid","_optimizer",
-                  "_criterion","_callbacks"]:
-            st.pop(k, None)
-        return st
-
-# ────────────── ④ 통합 전략 ──────────────
-class TorchDualUnifiedStrategy(BaseStrategy):
+# 전략
+class TorchMultiBranchStrategy(BaseStrategy):
     _DEFAULT_GRID = {
-        "dnn__module__merge": ["concat","sum","gate"],
-        "dnn__module__hidden2": [(32,16),(64,32)],
-        "dnn__module__drop2": [0.0, 0.2],
-        "dnn__lr_br2": [1e-3],
+        "dnn__optimizer__lr": [1e-3],
+        "dnn__optimizer__weight_decay": [1e-4],
+        "dnn__lr_br": [[1e-3]],
         "dnn__lr_head": [1e-3],
-        "dnn__optimizer__weight_decay": [0.0, 5e-4],
+        "dnn__lr_direct": [5e-4],
+        "dnn__module__head_hidden": [16],
     }
 
     def __init__(self, core, option: Dict, params_grid=None):
         super().__init__(core, option, params_grid)
-        cols = list(core.X.columns)
+        cols_X = list(core.X.columns)
+        cols_y = list(core.y.columns) if core.y.ndim > 1 else [core.y.name]
+        self.n_out = len(cols_y)
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        self.is_static = "slope" in option and option["slope"] is not None
-        self.merge     = option.get("merge", "concat")
+        # branches
+        branches_cfg = option.get("branches", [])
+        assert branches_cfg, "option['branches']는 최소 1개 필요합니다."
+        self.branches: List[Dict] = []
+        for br in branches_cfg:
+            c = br["cols"]
+            idx = [cols_X.index(col) for col in c]
+            self.branches.append({
+                "idx": idx,
+                "hidden": tuple(br.get("hidden", (32, 16))),
+                "drop": float(br.get("drop", 0.1)),
+            })
 
-        if self.is_static:
-            self.static_slope_idx = cols.index(option["slope"])
-            self.idx1 = None
-        else:
-            grp1 = option["grp1"]
-            self.idx1 = [cols.index(c) for c in grp1]
-            self.static_slope_idx = None
+        # direct map
+        direct_pairs = option.get("direct_map", []) or []
+        self.direct_in_idx: List[int] = []
+        self.direct_out_idx: List[int] = []
+        for in_name, out_name in direct_pairs:
+            if in_name not in cols_X:
+                raise ValueError(f"direct_map 입력 '{in_name}' 이 X 컬럼에 없습니다.")
+            if out_name not in cols_y:
+                raise ValueError(f"direct_map 타깃 '{out_name}' 이 y 컬럼에 없습니다.")
+            self.direct_in_idx.append(cols_X.index(in_name))
+            self.direct_out_idx.append(cols_y.index(out_name))
 
-        grp2 = option["grp2"]
-        self.idx2 = [cols.index(c) for c in grp2]
-
-        self.out_dim = 1 if core.y.ndim==1 else core.y.shape[1]
-        self.device  = "cuda" if torch.cuda.is_available() else "cpu"
+        # etc
+        self.freeze_direct = bool(option.get("freeze_direct", False))
+        self.head_hidden   = int(option.get("head_hidden", 16))
+        self.d_merge       = option.get("d_merge", None)
 
     def build_pipeline(self) -> Pipeline:
-        net = SafeNetDualLR(
-            module                   = UnifiedDualMLP,
-            # module args
-            module__idx2             = self.idx2,
-            module__out_dim          = self.out_dim,
-            module__merge            = self.merge,
-            module__idx1             = self.idx1,
-            module__static_slope_idx = self.static_slope_idx,
-            module__hidden1          = (3,),       # fixed 1 hidden
-            module__drop1            = 0.0,
-            module__hidden2          = (64,),
-            module__drop2            = 0.2,
-            # optimizer & train
-            optimizer                = torch.optim.Adam,
-            optimizer__lr            = 1e-3,
-            optimizer__weight_decay  = 0.0,
-            criterion                = nn.MSELoss,
-            batch_size               = 16,
-            max_epochs               = 100,
-            train_split              = ValidSplit(0.2, stratified=False),
-            callbacks = (
-                [PretrainSlope(self.static_slope_idx),
-                 EarlyStopping(monitor="valid_loss", patience=10, lower_is_better=True)]
-                if self.is_static else
-                [EarlyStopping(monitor="valid_loss", patience=10, lower_is_better=True)]
-            ),
-            device   = self.device,
-            verbose  = 0,
+        net = SafeNetNBranchLR(
+            module=MultiBranchNet,
+            module__branches=self.branches,
+            module__n_out=self.n_out,
+            module__direct_in_idx=self.direct_in_idx,
+            module__direct_out_idx=self.direct_out_idx,
+            module__freeze_direct=self.freeze_direct,
+            module__d_merge=self.d_merge,
+            module__head_hidden=self.head_hidden,
+            optimizer=torch.optim.Adam,
+            optimizer__lr=1e-3,
+            optimizer__weight_decay=1e-4,
+            criterion=nn.MSELoss,
+            batch_size=16,
+            max_epochs=100,
+            train_split=ValidSplit(0.2, stratified=False),
+            callbacks=[
+                PretrainDirectMap(),
+                EarlyStopping(monitor="valid_loss", patience=10, lower_is_better=True),
+            ],
+            device=self.device,
+            verbose=0,
         )
+
+        # 학습 전 로그 확인 : Default False (Just for Checking, Can eliminate later)
+        if self.option.get("log_direct", False):
+            cols_X = list(self.core.X.columns)
+            cols_y = list(self.core.y.columns) if self.core.y.ndim > 1 else [self.core.y.name]
+            pairs = [(cols_X[i], cols_y[j]) for i, j in zip(self.direct_in_idx, self.direct_out_idx)]
+            print("\n[DirectMap: before fit]")
+            print("  in_idx :", self.direct_in_idx)
+            print("  out_idx:", self.direct_out_idx)
+            print("  pairs  :", pairs, "\n")
+        #--------
 
         self.grid = getattr(self, "params_grid", None) or self._DEFAULT_GRID
 
         return Pipeline([
             ("sc",   StandardScaler()),
             ("to32", FunctionTransformer(
-                lambda z: (z.to_numpy(dtype=np.float32, copy=False)
-                           if isinstance(z, (pd.DataFrame, pd.Series))
-                           else z.astype(np.float32, copy=False)),
-                validate=False
+                lambda z: (
+                    z.to_numpy(dtype=np.float32, copy=False)
+                    if isinstance(z, (pd.DataFrame, pd.Series))
+                    else z.astype(np.float32, copy=False)
+                ),
+                validate=False,
             )),
             ("dnn",  net),
         ])
