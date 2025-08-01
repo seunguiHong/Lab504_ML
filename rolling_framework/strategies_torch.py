@@ -194,8 +194,16 @@ class PretrainDirectMap(Callback):
             mdl.b_direct.requires_grad_(False)
 
 
-# N-Branch + Gate + Head + Direct Residual
 class MultiBranchNet(nn.Module):
+    """
+    N-브랜치 인코더 + gate 병합 + head + direct-map(residual)
+    - branches        : List[dict]  ── 각 dict = {"idx": [...], "hidden": (...), "drop": float}
+    - direct_in_idx   : List[int]   ── direct 입력 열 인덱스
+    - direct_out_idx  : List[int]   ── direct 출력 타깃 인덱스 (y 열 순서 기준)
+    - freeze_direct   : bool        ── True ⇒ direct 파라미터 동결
+    - d_merge         : Optional[int] 병합 차원(없으면 브랜치 출력 차원 max, 0-branch면 n_out)
+    - head_hidden     : int         ── head 은닉 크기
+    """
     def __init__(
         self,
         branches: List[Dict],
@@ -208,76 +216,79 @@ class MultiBranchNet(nn.Module):
         head_drop: float = 0.0,
     ):
         super().__init__()
-        assert len(branches) >= 1, "at least one branch is required"
-        self.n_out = n_out
+        self.n_out        = n_out
         self.freeze_direct = freeze_direct
 
-        # branches
-        self.branch_idx: List[List[int]] = []
-        encoders: List[nn.Sequential] = []
-        out_dims: List[int] = []
-        for br in branches:
+        # ── 1) 브랜치 인코더 ────────────────────────────────────────
+        self.branch_idx:   List[List[int]] = []
+        self.branch_encoders = nn.ModuleList()
+        self.branch_projs    = nn.ModuleList()
+        out_dims: List[int]  = []
+
+        for br in branches:                                   # ← 0개도 허용
             idx   = br["idx"]
-            hid   = tuple(br.get("hidden", (32, 16)))
-            drop  = float(br.get("drop", 0.1))
+            hid   = tuple(br.get("hidden", ()))
+            drop  = float(br.get("drop", 0.0))
             enc, d_out = _mlp_with_dim(len(idx), hid, drop)
-            encoders.append(enc)
             self.branch_idx.append(idx)
+            self.branch_encoders.append(enc)
             out_dims.append(d_out)
-        self.branch_encoders = nn.ModuleList(encoders)
 
-        # merge proj
-        self.d_merge = d_merge if d_merge is not None else int(max(out_dims))
-        projs = []
-        for d in out_dims:
-            projs.append(nn.Identity() if d == self.d_merge else nn.Linear(d, self.d_merge))
-        self.branch_projs = nn.ModuleList(projs)
+        # ── 2) 병합 차원 & projection ──────────────────────────────
+        if len(out_dims) == 0:                                # 0-branch 특수처리
+            self.d_merge = int(d_merge or n_out)
+            self.alpha   = None                               # gate 불필요
+        else:
+            self.d_merge = int(d_merge or max(out_dims))
+            for d in out_dims:
+                self.branch_projs.append(nn.Identity() if d == self.d_merge
+                                          else nn.Linear(d, self.d_merge))
+            self.alpha = nn.Parameter(torch.zeros(len(branches)))  # softmax gate
 
-        # gate (global, input-independent)
-        self.alpha = nn.Parameter(torch.zeros(len(branches)))
-
-        # head
+        # ── 3) head ───────────────────────────────────────────────
         self.head = nn.Sequential(
             nn.Linear(self.d_merge, head_hidden), nn.ReLU(), nn.Dropout(head_drop),
             nn.Linear(head_hidden, n_out),
         )
 
-        # direct map
+        # ── 4) direct map 파트 ────────────────────────────────────
         self.direct_in_idx  = list(direct_in_idx or [])
         self.direct_out_idx = list(direct_out_idx or [])
         if len(self.direct_in_idx) != len(self.direct_out_idx):
-            raise ValueError("direct_in_idx와 direct_out_idx 길이가 같아야 합니다.")
-
-        if len(self.direct_in_idx) > 0:
+            raise ValueError("direct_in_idx, direct_out_idx 길이가 다릅니다.")
+        if self.direct_in_idx:
             M = len(self.direct_in_idx)
-            self.w_direct = nn.Parameter(torch.zeros(M, dtype=torch.float32), requires_grad=not self.freeze_direct)
-            self.b_direct = nn.Parameter(torch.zeros(M, dtype=torch.float32), requires_grad=not self.freeze_direct)
+            self.w_direct = nn.Parameter(torch.zeros(M), requires_grad=not freeze_direct)
+            self.b_direct = nn.Parameter(torch.zeros(M), requires_grad=not freeze_direct)
         else:
-            self.w_direct = None
-            self.b_direct = None
+            self.w_direct = self.b_direct = None
 
+    # ── forward ──────────────────────────────────────────────────
     def forward(self, X: torch.Tensor) -> torch.Tensor:
         dev = next(self.parameters()).device
         if X.device != dev:
             X = X.to(dev, non_blocking=True)
 
-        # branches → proj → stack
-        zs: List[torch.Tensor] = []
-        for enc, proj, idx in zip(self.branch_encoders, self.branch_projs, self.branch_idx):
-            zi = proj(enc(X[:, idx]))                  # (B, d_merge)
-            zs.append(zi)
-        w = torch.softmax(self.alpha, dim=0)           # (R,)
-        h = torch.stack(zs, dim=0)                     # (R, B, d_merge)
-        h = torch.einsum("r, rbd -> bd", w, h)         # (B, d_merge)
+        # (A) 브랜치 없으면 0-tensor, 있으면 gate 합
+        if len(self.branch_encoders) == 0:                    # 0-branch path
+            h = X.new_zeros(X.size(0), self.d_merge)
+        else:
+            zs = []
+            for enc, proj, idx in zip(self.branch_encoders, self.branch_projs, self.branch_idx):
+                zi = proj(enc(X[:, idx]))
+                zs.append(zi)                                # (B,d_merge)
+            w = torch.softmax(self.alpha, dim=0)             # (R,)
+            h = torch.stack(zs, 0)                           # (R,B,d_merge)
+            h = torch.einsum("r, rbd -> bd", w, h)           # gate 합
 
-        y_head = self.head(h)                          # (B, n_out)
+        y_head = self.head(h)                                # (B, n_out)
 
-        # direct residual
-        if self.w_direct is not None and len(self.direct_in_idx) > 0:
-            Xsel = X[:, self.direct_in_idx]            # (B, M)
-            z = Xsel * self.w_direct + self.b_direct   # (B, M)
-            y_direct = X.new_zeros(X.shape[0], self.n_out)
-            out_idx = torch.tensor(self.direct_out_idx, device=X.device, dtype=torch.long)
+        # (B) direct residual
+        if self.w_direct is not None:
+            Xsel = X[:, self.direct_in_idx]                  # (B,M)
+            z = Xsel * self.w_direct + self.b_direct         # (B,M)
+            y_direct = X.new_zeros(X.size(0), self.n_out)
+            out_idx = torch.tensor(self.direct_out_idx, device=X.device)
             y_direct.index_copy_(1, out_idx, z)
             return y_head + y_direct
 
