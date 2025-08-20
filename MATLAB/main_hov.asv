@@ -1,0 +1,488 @@
+%% ====================== MAIN (Intel MATLAB 2024b) =======================
+clear; clc; close all;
+dbstop if error
+rng(0);
+
+%% -------- GLMNET path (maci64) : 후보 경로들을 자동 추가 --------
+glmnet_candidates = {
+    '/Users/ethan_hong/Dropbox/0_Lab_504/Codes/504_ML/MATLAB/glmnet-matlab'
+    '/Users/ethan_hong/Documents/MATLAB/glmnet-matlab'
+    fullfile(fileparts(mfilename('fullpath')),'glmnet-matlab')
+};
+for c = 1:numel(glmnet_candidates)
+    if isfolder(glmnet_candidates{c})
+        addpath(genpath(glmnet_candidates{c}));
+    end
+end
+assert(~isempty(which('cvglmnet')), 'cvglmnet not found. Add glmnet-matlab to path.');
+fprintf('[INFO] mexext=%s, glmnetMex=%s\n', mexext, string(~isempty(which('glmnetMex'))));
+
+%% ------------------------------ CONFIG -----------------------------------
+isreload = true;  % 첫 실행 true → B2B.mat 캐시 생성. 이후 false로 속도↑
+
+DATA_DIR     = "data/";
+Y_FILE       = DATA_DIR + "exrets.csv";
+SLOPE_FILE   = DATA_DIR + "slope.csv";        % 열: s_2, s_3, s_5, s_7, s_10 가정
+YL_FILE      = DATA_DIR + "yl_all.csv";
+MACRO_FILE   = DATA_DIR + "MacroFactors.csv";
+IV_FILE      = DATA_DIR + "imp_vol.csv";
+RV_FILE      = DATA_DIR + "real_vol.csv";
+FWD_FILE     = DATA_DIR + "fwds.csv";
+CP_FILE      = DATA_DIR + "cp.csv";
+
+% 기간/버닌(YYYYMM)
+H             = 12;           % months ahead (평가 시 t+H의 동시시점 사용)
+PERIOD_START  = 199109;
+PERIOD_END    = 202312;
+BURN_START    = 199109;
+BURN_END      = 20909; 
+
+MATURITIES = ["xr_2","xr_5","xr_10"];
+
+% X 조합 (slope는 spec에 넣지 않음)
+spec_str   = "fwd";
+
+% slope 매칭 옵션: true → xr_k ↔ s_k, false → 모든 만기에 s_10 고정
+matching_slope = true;
+
+% GLMNET/검증 옵션 (시간순 holdout CV: train 70%, val 30% 기본)
+base_opts = struct('alpha',0,'standardize',1,'lambda',[]);  % lambda=[]이면 자동 경로
+VAL_FRAC  = 0.30;   % holdout의 검증 비율 (가장 최근 구간)
+VAL_MIN   = 0;      % 검증 최소 길이(월)
+
+%% ------------------------------- LOAD ------------------------------------
+if isreload
+    to_yyyymm  = @(t) local_to_yyyymm_yyyymm_only(t);
+    load_csv   = @(path) local_load_csv_any(path, to_yyyymm);
+
+    data.y     = load_csv(Y_FILE);
+    data.slope = load_csv(SLOPE_FILE);
+    data.yl    = load_csv(YL_FILE);
+    data.macro = load_csv(MACRO_FILE);
+    data.iv    = load_csv(IV_FILE);
+    data.rv    = load_csv(RV_FILE);
+    data.fwd   = load_csv(FWD_FILE);
+    data.cp    = load_csv(CP_FILE);
+
+    y_cols = MATURITIES(ismember(MATURITIES, string(data.y.Properties.VariableNames)));
+    assert(~isempty(y_cols), "MATURITIES not in exrets");
+    data.y = data.y(:, ["Time", y_cols]);
+
+    save('B2B.mat','data','y_cols','-v7.3');
+else
+    load('B2B.mat','data','y_cols');
+end
+
+%% ------------------------- BUILD X / ALIGN -------------------------------
+[Xtable, ~] = build_X_from_spec(spec_str, data);        % slope는 여기서 다루지 않음
+[y_aligned, X_aligned] = local_align_pair(data.y, Xtable);
+
+% 기간 필터
+mask = (y_aligned.Time >= PERIOD_START) & (y_aligned.Time <= PERIOD_END);
+y_aligned = y_aligned(mask,:);  
+X_aligned = X_aligned(mask,:);
+
+Time = y_aligned.Time;
+Y0   = tbl2mat_no_time(y_aligned);          % T x J
+X    = tbl2mat_no_time(X_aligned);          % T x p
+[T, J] = size(Y0);
+p = size(X,2);
+
+% X 변수명 기록(계수 축 매핑용)
+X_VAR_NAMES = setdiff(X_aligned.Properties.VariableNames, {'Time'}, 'stable');
+X_VAR_NAMES = string(X_VAR_NAMES);
+
+% slope 매핑 (xr_k → s_k 또는 s_10)
+[S, slope_cols] = get_slope_matrix_aligned(data.slope, data.y, y_cols, Time, matching_slope);  % T x J
+fprintf('[DEBUG] size(S)=%dx%d, J=%d | slope cols: %s\n', size(S,1), size(S,2), J, strjoin(slope_cols, ', '));
+fprintf('[INFO] Aligned sample: %d ~ %d (T=%d)\n', min(Time), max(Time), T);
+
+% 버닌 마지막 idx (BURN_END 이상 첫 관측)
+idx_burn_end = find(Time >= BURN_END, 1, 'first');
+assert(~isempty(idx_burn_end), 'BURN_END not in sample window.');
+
+% OOS 평가 개수: 학습·검증의 마지막 시점 t에서 t+H로 이동하여 테스트
+nOOS = T - idx_burn_end - H;
+assert(nOOS > 0, 'Not enough OOS observations.');
+
+%% --------------------------- PREALLOC ------------------------------------
+B     = cell(nOOS, J);   % CS 계수 저장([const; beta_slope]) 또는 상수-only
+err_0 = zeros(nOOS, J);  % baseline (동시시점 CS 또는 상수-only)
+err_1 = zeros(nOOS, J);  % Ridge on X (holdout)
+err_2 = zeros(nOOS, J);  % CS-residual + Ridge(X only)
+err_3 = zeros(nOOS, J);  % Ridge with penalized slope [s_j, X]
+err_4 = zeros(nOOS, J);  % Ridge with *unpenalized* slope
+err_5 = zeros(nOOS, J);  % slope-only (Ridge)
+
+% ---- 실험별 X-factor loading 기록 (3D: nOOS × J × p) ----
+BETA_1 = nan(nOOS, J, p);     % 실험 1: X만
+BETA_2 = nan(nOOS, J, p);     % 실험 2: X만 (CS 잔차)
+BETA_3 = nan(nOOS, J, p);     % 실험 3: [slope, X] 중 X만
+BETA_4 = nan(nOOS, J, p);     % 실험 4: [slope(unpen), X] 중 X만
+% slope 계수 기록 (실험 3/4/5)
+BETA_3_SLOPE = nan(nOOS, J);
+BETA_4_SLOPE = nan(nOOS, J);
+BETA_5_SLOPE = nan(nOOS, J);
+
+%% ----------------------------- MAIN --------------------------------------
+% 학습/검증: (X_s, y_s) 동시시점
+% 테스트:   (X_{t+H}, y_{t+H}) 동시시점
+tic
+for i = 1:nOOS
+    t  = idx_burn_end + i - 1;      % 학습/검증 윈도 마지막 시점
+
+    for j = 1:J
+        % -------------------- 공통 학습/검증 세트 --------------------
+        % 학습/검증: s=1..t → (X_s, S_{s,j})로 y_s
+        % 테스트:   (X_{t+H}, S_{t+H,j}) → y_{t+H}
+        Xtr_full = X(1:t, :);              % n × p
+        y_full   = Y0(1:t, j);             % n × 1
+        Sj_full  = S(1:t, j);              % n × 1
+
+        % 테스트 입력/정답 (동시시점, t+H)
+        x_new    = X(t+H, :);              % 1 × p
+        sj_new   = S(t+H, j);              % 1 × 1
+        y_true   = Y0(t+H, j);             % 1 × 1
+
+        % NaN 행 제거(학습/검증)
+        m1 = all(~isnan(Xtr_full),2) & ~isnan(y_full);
+        m2 = m1 & ~isnan(Sj_full);
+
+        X1 = Xtr_full(m1,:);    y1 = y_full(m1);     % 실험1용 (slope 미사용)
+        Xs = Xtr_full(m2,:);    ys = y_full(m2);     % 2~5용 (slope 사용)
+        Ss = Sj_full(m2);
+
+        % ---------- (0) 동시시점 Campbell–Shiller baseline ----------
+        if ~isempty(Ss)
+            Z   = [ones(numel(Ss),1), Ss];
+            Bj  = Z \ ys;                               % [const; beta_slope]
+            yhat0 = [1, sj_new] * Bj;                   % 테스트 입력: t+H의 slope
+        else
+            Z   = ones(numel(y1),1);
+            Bj  = Z \ y1;                               % 상수만
+            yhat0 = [1] * Bj;
+        end
+        err_0(i,j) = y_true - yhat0;
+        B{i,j}     = Bj;
+
+        % ---------- 시간순 holdout으로 λ 선택 ----------
+        % (1) Ridge on X  — 학습·검증 동시시점, 테스트 t+H 동시시점
+        lambda1 = select_lambda_holdout(X1, y1, base_opts, VAL_FRAC, VAL_MIN);
+        fit1    = glmnet(X1, y1, 'gaussian', setfield(base_opts,'lambda',lambda1));
+        yhat1   = glmnetPredict(fit1, x_new, lambda1, 'response');
+        err_1(i,j) = y_true - yhat1;
+        % X 로딩 기록
+        b1 = full(fit1.beta);           % p×1
+        if numel(b1)==p, BETA_1(i,j,:) = b1(:); end
+
+        % (2) CS-residual + Ridge(X only)  (CS 계수 고정, X만 잔차 설명)
+        if ~isempty(Ss)
+            resY2   = ys - [ones(numel(Ss),1), Ss] * Bj;   % 동시시점 CS 잔차
+            lambda2 = select_lambda_holdout(Xs, resY2, base_opts, VAL_FRAC, VAL_MIN);
+            fit2    = glmnet(Xs, resY2, 'gaussian', setfield(base_opts,'lambda',lambda2));
+            add2    = glmnetPredict(fit2, x_new, lambda2, 'response');  % 입력: X_{t+H}
+            yhat2   = [1, sj_new]*Bj + add2;
+        else
+            yhat2   = yhat1;
+        end
+        err_2(i,j) = y_true - yhat2;
+        % X 로딩 기록
+        if ~isempty(Ss)
+            b2 = full(fit2.beta);       % p×1
+            if numel(b2)==p, BETA_2(i,j,:) = b2(:); end
+        end
+
+        % (3) Ridge with penalized slope : [S_{s,j}, X_s] (둘 다 패널티)
+        if ~isempty(Ss)
+            X3      = [Ss, Xs];
+            opts3   = base_opts; opts3.penalty_factor = ones(1, size(X3,2));
+            lambda3 = select_lambda_holdout(X3, ys, opts3, VAL_FRAC, VAL_MIN);
+            fit3    = glmnet(X3, ys, 'gaussian', setfield(opts3,'lambda',lambda3));
+            yhat3   = glmnetPredict(fit3, [sj_new, x_new], lambda3, 'response'); % 입력: t+H
+        else
+            yhat3   = yhat1;
+        end
+        err_3(i,j) = y_true - yhat3;
+        % slope/X 로딩 기록
+        if ~isempty(Ss)
+            b3 = full(fit3.beta);       % (1+p)×1  (첫 항: slope)
+            if numel(b3)==(1+p)
+                BETA_3_SLOPE(i,j) = b3(1);
+                BETA_3(i,j,:)     = b3(2:end);
+            end
+        end
+
+        % (4) Ridge with *unpenalized* slope : penalty_factor(1)=0
+        if ~isempty(Ss)
+            X4      = [Ss, Xs];
+            opts4   = base_opts; opts4.penalty_factor = [0, ones(1,size(Xs,2))];
+            lambda4 = select_lambda_holdout(X4, ys, opts4, VAL_FRAC, VAL_MIN);
+            fit4    = glmnet(X4, ys, 'gaussian', setfield(opts4,'lambda',lambda4));
+            yhat4   = glmnetPredict(fit4, [sj_new, x_new], lambda4, 'response'); % 입력: t+H
+        else
+            yhat4   = yhat1;
+        end
+        err_4(i,j) = y_true - yhat4;
+        % slope/X 로딩 기록
+        if ~isempty(Ss)
+            b4 = full(fit4.beta);       % (1+p)×1  (첫 항: slope)
+            if numel(b4)==(1+p)
+                BETA_4_SLOPE(i,j) = b4(1);
+                BETA_4(i,j,:)     = b4(2:end);
+            end
+        end
+
+        % (5) slope-only (Ridge; OLS=벤치마크 동일화 원하면 주석 참고)
+        if ~isempty(Ss)
+            X5      = Ss; y5 = ys;
+            opts5   = base_opts; opts5.penalty_factor = 1;
+            lambda5 = select_lambda_holdout(X5, y5, opts5, VAL_FRAC, VAL_MIN);
+            fit5    = glmnet(X5, y5, 'gaussian', setfield(opts5,'lambda',lambda5));
+            yhat5   = glmnetPredict(fit5, sj_new, lambda5, 'response');           % 입력: t+H
+            % OLS로 벤치마크와 동일하게 만들려면:
+            % b5    = [ones(numel(Ss),1), Ss] \ ys;
+            % yhat5 = [1, sj_new] * b5;
+            % slope 로딩 기록
+            b5 = full(fit5.beta);       % 1×1
+            if ~isempty(b5), BETA_5_SLOPE(i,j) = b5(1); end
+        else
+            yhat5   = yhat0;
+        end
+        err_5(i,j) = y_true - yhat5;
+
+        if any(isnan([x_new, sj_new])) || isnan(y_true)
+            warning('NaN in test (t+H) at Time=%d (j=%d).', Time(t+H), j);
+        end
+    end
+end
+toc
+
+%% ----------------------------- REPORT ------------------------------------
+R2 = 1 - [sum(err_1.^2); sum(err_2.^2); sum(err_3.^2); sum(err_4.^2); sum(err_5.^2)] ./ sum(err_0.^2);
+disp('Rows = {1: X ridge, 2: CS-residual + Ridge(X only), 3: ridge+penalized slope, 4: ridge+unpenalized slope, 5: slope-only}');
+disp(R2)
+
+% ---- 워크스페이스 확인 편의 ----
+assignin('base','X_VAR_NAMES',X_VAR_NAMES);
+assignin('base','BETA_1',BETA_1);
+assignin('base','BETA_2',BETA_2);
+assignin('base','BETA_3',BETA_3);
+assignin('base','BETA_4',BETA_4);
+assignin('base','BETA_3_SLOPE',BETA_3_SLOPE);
+assignin('base','BETA_4_SLOPE',BETA_4_SLOPE);
+assignin('base','BETA_5_SLOPE',BETA_5_SLOPE);
+
+%% ============================ HELPERS ====================================
+function [Xtable, useSlopeFlag] = build_X_from_spec(spec_str, data)
+% slope는 여기서 처리하지 않는다. 허용 토큰: iv/macro/rv/fwd/yl/cp (옵션 인자 가능)
+    useSlopeFlag = false;  % 호환
+    spec_char = char(spec_str);
+    toks = regexp(strtrim(spec_char), '\s*\+\s*', 'split');
+    tabs = {}; 
+    for k = 1:numel(toks)
+        s  = lower(strtrim(toks{k}));
+        m = regexp(s, '^(iv|macro|rv|fwd|yl|cp)(?:\(([^)]*)\))?$', 'tokens', 'once');
+        assert(~isempty(m), 'Bad token in spec: %s', s);
+        name = m{1};
+        T = data.(name);
+        if numel(m) >= 2 && ~isempty(m{2})
+            argsStr = strrep(m{2}, ' ', '');
+            if ~isempty(argsStr)
+                cols = string(split(argsStr, ','));
+                cols = cols(cols~="");
+                T = select_by_names_keep_time(T, cols);
+            end
+        end
+        tabs{end+1} = T; %#ok<AGROW>
+    end
+    assert(~isempty(tabs), 'No X sources specified.');
+    Xtable = tabs{1};
+    for k = 2:numel(tabs), Xtable = join_on_time(Xtable, tabs{k}); end
+end
+
+function lambda_sel = select_lambda_holdout(X, y, opts, val_frac, val_min)
+% 시간순 holdout(최근 val_frac, 최소 val_min 관측)을 검증창으로 사용해 λ 선택
+    n = size(X,1);
+    v  = max(val_min, max(1, floor(val_frac * n)));
+    ntr = n - v;
+    assert(ntr >= 5, 'Too few training obs for holdout.');
+    Xtr = X(1:ntr,:);  ytr = y(1:ntr);
+    Xv  = X(ntr+1:end,:); yv = y(ntr+1:end);
+
+    % λ 그리드
+    if isfield(opts,'lambda') && ~isempty(opts.lambda)
+        lambda_grid = opts.lambda(:);
+    else
+        fit_master = glmnet(Xtr, ytr, 'gaussian', rmfield_if(opts,'lambda'));
+        lambda_grid = fit_master.lambda(:);
+    end
+
+    % 한 번의 적합으로 전체 그리드 예측
+    fit = glmnet(Xtr, ytr, 'gaussian', setfield(opts,'lambda',lambda_grid)); %#ok<SFLD>
+    pred = glmnetPredict(fit, Xv, lambda_grid, 'response');   % |V|×|λ|
+    mse  = mean((yv - pred).^2, 1);
+    [~, ix] = min(mse);
+    lambda_sel = lambda_grid(ix);
+end
+
+function S = rmfield_if(S, fname)
+    if isfield(S, fname), S = rmfield(S, fname); end
+end
+
+function [S, slope_cols_matched] = get_slope_matrix_aligned(slopeTable, yTable, y_cols, TimeTarget, matching_slope)
+% matching_slope=true  → xr_k ↔ s_k 매칭
+% matching_slope=false → 모든 만기에 동일하게 s_10 사용
+    vn = slopeTable.Properties.VariableNames;  % cellstr
+    J  = numel(y_cols);
+    y_str = cellstr(y_cols(:));
+
+    if nargin < 5 || matching_slope
+        % ---- 기본: xr_k → s_k ----
+        slope_guess = regexprep(y_str, '^xr_', 's_');  % {'s_2','s_3',...}
+        % s2 같은 대체 표기도 허용
+        for kk = 1:numel(slope_guess)
+            if ~ismember(slope_guess{kk}, vn)
+                tok = regexp(y_str{kk}, '(\d+)$', 'tokens', 'once');
+                if ~isempty(tok)
+                    alt  = ['s_' tok{1}];
+                    if ismember(alt, vn), slope_guess{kk} = alt; continue; end
+                    alt2 = ['s' tok{1}];
+                    if ismember(alt2, vn), slope_guess{kk} = alt2; continue; end
+                end
+            end
+        end
+        found = ismember(slope_guess, vn);
+        assert(all(found), 'slope.csv missing columns: %s', strjoin(slope_guess(~found), ', '));
+
+        keep = [{'Time'}, slope_guess(:)'];
+        slopeSel = slopeTable(:, keep);
+        [~, S2]  = local_align_pair(yTable, slopeSel);  % y 타임스탬프와 정렬
+        S = tbl2mat_no_time(S2);                        % T×J
+
+        % 필요시 TimeTarget으로 재정렬(NaN 허용)
+        if ~isequal(S2.Time, TimeTarget)
+            [~, ia, ib] = intersect(TimeTarget, S2.Time, 'stable');
+            Sfull = nan(numel(TimeTarget), size(S,2));
+            Sfull(ia,:) = S(ib,:);
+            S = Sfull;
+        end
+        slope_cols_matched = slope_guess(:)';  % 1×J
+
+    else
+        % ---- 옵션 OFF: 모든 만기에 s_10 고정 ----
+        % 후보 이름: 's_10' 우선, 없으면 's10' 또는 정규식 ^s[_]?10$
+        fixed_name = '';
+        if ismember('s_10', vn)
+            fixed_name = 's_10';
+        elseif ismember('s10', vn)
+            fixed_name = 's10';
+        else
+            % 정규식 검색
+            hit = find(~cellfun('isempty', regexp(vn, '^s[_]?10$', 'once')), 1, 'first');
+            assert(~isempty(hit), 'slope.csv에 s_10 (또는 s10) 열이 없습니다.');
+            fixed_name = vn{hit};
+        end
+
+        % Time + s_10만 선택해서 정렬
+        slopeSel = slopeTable(:, [{'Time'}, {fixed_name}]);
+        [~, S2]  = local_align_pair(yTable, slopeSel);
+        s10_vec  = tbl2mat_no_time(S2);   % T×1
+
+        % 필요시 TimeTarget으로 재정렬
+        if ~isequal(S2.Time, TimeTarget)
+            [~, ia, ib] = intersect(TimeTarget, S2.Time, 'stable');
+            Sfull = nan(numel(TimeTarget), 1);
+            Sfull(ia) = s10_vec(ib);
+            s10_vec = Sfull;
+        end
+
+        % 모든 만기에 복제
+        S = repmat(s10_vec, 1, J);                     % T×J (모든 열이 s_10)
+        slope_cols_matched = repmat({fixed_name}, 1, J);
+    end
+end
+
+function T2 = select_by_names_keep_time(T, namesWanted)
+    vn = string(T.Properties.VariableNames);
+    assert(any(vn=="Time"), 'Table has no Time column.');
+    req = string(namesWanted(:));
+    existMask = ismember(req, vn);
+    if ~all(existMask)
+        missing = req(~existMask);
+        if ~isempty(missing)
+            fprintf('[WARN] Missing columns ignored: %s\n', strjoin(cellstr(missing), ', '));
+        end
+    end
+    keep = req(existMask);
+    if isempty(keep), T2 = T; else, T2 = T(:, [{'Time'}, cellstr(keep)]); end
+end
+
+function M = tbl2mat_no_time(T)
+    if any(strcmp('Time', T.Properties.VariableNames))
+        try, T = removevars(T, 'Time'); catch
+            idx = find(strcmp('Time', T.Properties.VariableNames), 1);
+            T = T(:, setdiff(1:width(T), idx));
+        end
+    end
+    M = double(table2array(T));
+end
+
+function T = local_load_csv_any(path, to_yyyymm)
+    try
+        opts = detectImportOptions(path, 'TextType','string'); try, opts.VariableNamingRule = 'preserve'; catch, end
+        T = readtable(path, opts);
+    catch
+        T = readtable(path, 'TextType','string');
+    end
+    names = string(T.Properties.VariableNames);
+    key = lower(regexprep(names, '\s+|[_\-:/\.]', ''));
+    cand = ["time","date","yyyymm","ym","t","month","period"];
+    idx  = find(ismember(key, cand), 1, 'first');
+    if isempty(idx), idx = find(startsWith(names,"Unnamed",'IgnoreCase',true) | strcmpi(names,"index"), 1, 'first'); end
+    if isempty(idx), idx = 1; end
+
+    % Time 생성 및 정렬
+    T.Time = to_yyyymm(T{:, idx});
+    [T.Time, ord] = sort(T.Time); T = T(ord,:);
+
+    % 비-숫자 열을 숫자로 강제 변환 (Time 열 제외)
+    time_idx = find(strcmp('Time', T.Properties.VariableNames), 1);
+    for j = 1:width(T)
+        if j == time_idx, continue; end
+        if ~isnumeric(T{:,j})
+            T{:,j} = double(str2double(string(T{:,j})));
+        end
+    end
+end
+
+function [y2, X2] = local_align_pair(y, X)
+    [~, ia, ib] = intersect(y.Time, X.Time, 'stable'); y2 = y(ia,:); X2 = X(ib,:);
+end
+
+function T = join_on_time(A, B)
+    A = sortrows(A, 'Time'); B = sortrows(B, 'Time');
+    [~, ia, ib] = intersect(A.Time, B.Time, 'stable'); A = A(ia,:); B = B(ib,:);
+    varsA = setdiff(A.Properties.VariableNames, {'Time'});
+    varsB = setdiff(B.Properties.VariableNames, {'Time'});
+    varsB = setdiff(varsB, varsA);
+    T = [A(:, [{'Time'}, varsA]), B(:, varsB)];
+end
+
+function yyyymm = local_to_yyyymm_yyyymm_only(tcol)
+    if istable(tcol), tcol = tcol{:,1}; end
+    if iscellstr(tcol) || isstring(tcol)
+        s = string(tcol);
+        ok = ~cellfun('isempty', regexp(cellstr(s), '^\d{6}$', 'once'));
+        assert(all(ok), 'Time must be exactly 6 digits (YYYYMM).');
+        y = str2double(extractBefore(s,5)); m = str2double(extractAfter(s,4));
+        assert(all(m>=1 & m<=12), 'Month must be 01..12.');
+        yyyymm = double(y*100 + m); yyyymm = yyyymm(:);
+    elseif isnumeric(tcol)
+        v = double(tcol(:)); m = mod(v, 100); assert(all(m>=1 & m<=12));
+        yyyymm = v;
+    elseif isdatetime(tcol)
+        yyyymm = double(year(tcol)*100 + month(tcol)); yyyymm = yyyymm(:);
+    else
+        error('Unsupported Time column type.');
+    end
+end
