@@ -130,8 +130,7 @@ class TreeStrategy(BaseStrategy):
         ])
 
 from .strategies_torch import (
-    TorchDNNStrategy,
-    TorchMultiBranchStrategy,
+    ARMStrategy,TorchDNNStrategy
 )
 
 # ── dispatcher ───────────────────────────────────────────
@@ -142,5 +141,5 @@ STRATEGIES = {
     'Penalized': PenalizedStrategy,
     'Tree':      TreeStrategy,
     'DNN':       TorchDNNStrategy,   # ← 별도 파일에서 정의됨 (strategies_torch.py)
-    'DNN_NBR' : TorchMultiBranchStrategy,
+    "ARM": ARMStrategy,
 }
