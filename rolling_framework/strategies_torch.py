@@ -211,18 +211,12 @@ class SafeNetNBranchLR(NeuralNetRegressor):
         return super().infer(x, **fit_params)
 
 
-# ─────────── ④ ARM: Base + Residual ───────────
+# ─────────── ④ ARM: Base + Residual (fixed for sklearn.clone) ───────────
 class AdditiveResidualModel(BaseEstimator, RegressorMixin):
     """
     y_hat = [base_on ? f_base(X[base_cols]) : 0] + f_residual(X[feature_cols])
-    - base_on=True  → residual은 잔차 U=Y - Y_base 를 학습 (CS-Resi/Hybrid)
-    - base_on=False → residual이 Y 자체를 학습 (일반 DNN)
-    - residual_model: 멀티타깃 회귀기(SafeNet 또는 SafeNetNBranchLR)
-    - feature_cols: residual 입력 컬럼의 '순서'(미지정 시 X의 수치형 전체)
-    강건성:
-      * 필수 컬럼 검사
-      * NaN 행 동기 마스킹(훈련), 추론 시 NaN 대치
-      * 잔차 입력만 표준화(StandardScaler)
+    - __init__에서는 어떤 파라미터도 변형/복사하지 않음(= sklearn.clone 규칙 준수)
+    - 전처리는 fit() 내부에서만 수행
     """
     def __init__(self,
                  base_on: bool = True,
@@ -233,16 +227,17 @@ class AdditiveResidualModel(BaseEstimator, RegressorMixin):
                  feature_cols: Optional[List[str]] = None,
                  standardize_res: bool = True,
                  seed: int = 0):
-        self.base_on = bool(base_on)
-        self.base_cols = list(base_cols or [])
-        self.target_cols = list(target_cols or [])
+        # --- 절대 변형 금지: 전달받은 그대로 저장 ---
+        self.base_on = base_on
+        self.base_cols = base_cols
+        self.target_cols = target_cols
         self.residual_model = residual_model
-        self.base_model = base_model or LinearRegression()
-        self.feature_cols = list(feature_cols or [])
-        self.standardize_res = bool(standardize_res)
-        self.seed = int(seed)
+        self.base_model = base_model
+        self.feature_cols = feature_cols
+        self.standardize_res = standardize_res
+        self.seed = seed
 
-        # state
+        # fitted state (언더스코어 사용)
         self._scaler: Optional[StandardScaler] = None
         self._feat_cols_used: List[str] = []
         self._target_dim: int = 0
@@ -262,21 +257,16 @@ class AdditiveResidualModel(BaseEstimator, RegressorMixin):
         base = (cols if cols is not None and len(cols) > 0 else list(df.columns))
         return [c for c in base if c in df.columns and np.issubdtype(df[c].dtype, np.number)]
 
-    def _check_required_cols(self, X: pd.DataFrame, y: pd.DataFrame):
-        miss_t = [c for c in self.target_cols if c not in y.columns]
+    def _check_required_cols(self, X: pd.DataFrame, y: pd.DataFrame,
+                             target_cols: List[str], base_cols: Optional[List[str]]):
+        miss_t = [c for c in target_cols if c not in y.columns]
         if miss_t:
             raise ValueError(f"[ARM] target_cols missing: {miss_t}")
         if self.base_on:
-            miss_b = [c for c in self.base_cols if c not in X.columns]
+            bc = base_cols or []
+            miss_b = [c for c in bc if c not in X.columns]
             if miss_b:
                 raise ValueError(f"[ARM] base_cols missing: {miss_b}")
-
-    def _pick_features(self, X: pd.DataFrame) -> List[str]:
-        if self.feature_cols:
-            feats = self._numeric_cols(X, self.feature_cols)
-        else:
-            feats = self._numeric_cols(X)
-        return feats
 
     def _nan_mask_joint(self, arrays: List[np.ndarray]) -> np.ndarray:
         mask = np.ones(arrays[0].shape[0], dtype=bool)
@@ -289,25 +279,36 @@ class AdditiveResidualModel(BaseEstimator, RegressorMixin):
     def fit(self, X: pd.DataFrame, y: pd.DataFrame):
         assert isinstance(X, pd.DataFrame), "X must be DataFrame"
         if isinstance(y, pd.Series): y = y.to_frame()
-        self._check_required_cols(X, y)
 
-        np.random.seed(self.seed)
-        torch.manual_seed(self.seed)
+        # --- 로컬에서만 파생값 생성 (원 파라미터는 보존) ---
+        target_cols = list(self.target_cols or (list(y.columns) if hasattr(y, "columns") else []))
+        base_cols   = list(self.base_cols or [])
+        feat_cols   = list(self.feature_cols) if (self.feature_cols is not None and len(self.feature_cols) > 0) else None
 
-        Y_df = y[self.target_cols].copy()
+        self._check_required_cols(X, y, target_cols, base_cols)
+
+        # seed
+        np.random.seed(int(self.seed))
+        torch.manual_seed(int(self.seed))
+
+        # targets
+        Y_df = y[target_cols].copy()
         Y = self._to_2d(Y_df)
         self._target_dim = Y.shape[1]
 
         # base features
         if self.base_on:
-            Xb_cols = self._numeric_cols(X, self.base_cols)
+            Xb_cols = self._numeric_cols(X, base_cols)
             Xb = self._to_2d(X[Xb_cols])
         else:
             Xb_cols = []
             Xb = np.zeros((len(X), 1), dtype=np.float32)  # 마스크 동기화용 dummy
 
         # residual features (ordered)
-        self._feat_cols_used = self._pick_features(X)
+        if feat_cols is None:
+            self._feat_cols_used = self._numeric_cols(X)   # 전체 수치형
+        else:
+            self._feat_cols_used = self._numeric_cols(X, feat_cols)
         Xres = self._to_2d(X[self._feat_cols_used]) if self._feat_cols_used else np.zeros((len(X), 1), np.float32)
 
         # NaN joint mask
@@ -317,47 +318,56 @@ class AdditiveResidualModel(BaseEstimator, RegressorMixin):
         if n_drop > 0:
             Xb, Y, Xres = Xb[m], Y[m], Xres[m]
 
+        # base_model: None이면 로컬 디폴트 생성 (원 파라미터 보존)
+        base_model = self.base_model if self.base_model is not None else LinearRegression()
+
         # base fit & residual target
         if self.base_on:
-            self.base_model.fit(Xb, Y)
-            Y_base = self.base_model.predict(Xb).astype(np.float32, copy=False)
+            base_model.fit(Xb, Y)
+            # fitted state로 보관(학습 후에만)
+            self._base_model_fitted_ = base_model
+            Y_base = base_model.predict(Xb).astype(np.float32, copy=False)
             U = Y - Y_base
         else:
+            self._base_model_fitted_ = None
             U = Y
 
         # scale residual features
-        if self.standardize_res and Xres.shape[1] > 0:
+        if bool(self.standardize_res) and Xres.shape[1] > 0:
             self._scaler = StandardScaler(with_mean=True, with_std=True)
             Z = self._scaler.fit_transform(Xres)
         else:
             self._scaler = None
             Z = Xres
 
-        # residual fit
+        # residual fit (원 파라미터 self.residual_model은 변형하지 않음)
         if (self.residual_model is None) or (Z.shape[1] == 0):
-            self.residual_model = None
+            self._residual_model_fitted_ = None
         else:
+            # clone 필요 없음: 외부 GridSearch가 clone을 담당
             self.residual_model.fit(Z, U)
+            self._residual_model_fitted_ = self.residual_model
 
         return self
 
     # predict
     def _predict_base(self, X: pd.DataFrame) -> np.ndarray:
-        if not self.base_on:
+        if not self.base_on or getattr(self, "_base_model_fitted_", None) is None:
             return np.zeros((len(X), self._target_dim), dtype=np.float32)
-        Xb = self._to_2d(X[self._numeric_cols(X, self.base_cols)])
+        Xb = self._to_2d(X[self._numeric_cols(X, list(self.base_cols or []))])
         if not np.isfinite(Xb).all():
             Xb = np.nan_to_num(Xb, copy=False)
-        return self.base_model.predict(Xb).astype(np.float32, copy=False)
+        return self._base_model_fitted_.predict(Xb).astype(np.float32, copy=False)
 
     def _predict_residual(self, X: pd.DataFrame) -> np.ndarray:
-        if (self.residual_model is None) or (len(self._feat_cols_used) == 0):
+        mdl = getattr(self, "_residual_model_fitted_", None)
+        if (mdl is None) or (len(self._feat_cols_used) == 0):
             return np.zeros((len(X), self._target_dim), dtype=np.float32)
         Xr = self._to_2d(X[self._feat_cols_used])
         if not np.isfinite(Xr).all():
             Xr = np.nan_to_num(Xr, copy=False)
         Z = self._scaler.transform(Xr) if self._scaler is not None else Xr
-        P = self.residual_model.predict(Z).astype(np.float32, copy=False)
+        P = mdl.predict(Z).astype(np.float32, copy=False)
         if P.ndim == 1: P = P.reshape(-1, 1)
         return P
 
@@ -365,7 +375,7 @@ class AdditiveResidualModel(BaseEstimator, RegressorMixin):
         return self._predict_base(X) + self._predict_residual(X)
 
     def score(self, X: pd.DataFrame, y: pd.DataFrame) -> float:
-        Ytrue = (y if isinstance(y, pd.DataFrame) else y.to_frame())[self.target_cols].to_numpy(dtype=np.float32, copy=False)
+        Ytrue = (y if isinstance(y, pd.DataFrame) else y.to_frame())[list(self.target_cols or y.columns)].to_numpy(dtype=np.float32, copy=False)
         Yhat = self.predict(X)
         return -float(np.mean((Ytrue - Yhat) ** 2))
 
