@@ -400,7 +400,7 @@ class TorchDNNStrategy(BaseStrategy):
         )
 
     def build_pipeline(self) -> Pipeline:
-        opt = self.option or {}
+        opt = getattr(self, "option", None) or getattr(self, "opt", {}) or {}
         n_out = 1 if self.core.y.ndim == 1 else self.core.y.shape[1]
 
         # --- 스케일러 선택 ---
@@ -462,7 +462,7 @@ class ARMStrategy(BaseStrategy):
     }
 
     def build_pipeline(self) -> Pipeline:
-        opt: Dict[str, Any] = self.option or {}
+        opt: Dict[str, Any] = getattr(self, "option", None) or getattr(self, "opt", {}) or {}
 
         base_on: bool = bool(opt.get("base_on", True))
         base_cols: List[str] = list(opt.get("base_cols", []))
