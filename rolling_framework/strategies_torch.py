@@ -1,10 +1,11 @@
 """
-PyTorch-기반 전략 (ARM: Additive Residual Model)
+PyTorch-기반 전략 (ARM: Additive Residual Model + Simple DNN)
 ────────────────────────────────────────────────────────────────────
-• TorchMLP              : 단순 feed-forward MLP (residual learner)
+• TorchMLP              : 단순 feed-forward MLP
 • MultiBranchNet        : N-branch encoder + softmax gate + head
 • AdditiveResidualModel : Base(선형) + Residual(MLP/Multi-branch)
-• ARMStrategy           : 외부 인터페이스(옵션으로 Base on/off, residual 종류 선택)
+• ARMStrategy           : CS-Resi/Hybrid/Plain DNN까지 포괄
+• TorchDNNStrategy      : 가장 단순한 순수 DNN(레거시 호환/경량)
 """
 
 from __future__ import annotations
@@ -19,13 +20,15 @@ import torch.nn as nn
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.pipeline import Pipeline
 from sklearn.linear_model import LinearRegression
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, FunctionTransformer
 from skorch import NeuralNetRegressor
 from skorch.callbacks import EarlyStopping
 from skorch.dataset import ValidSplit
 from skorch.utils import to_device
 
-# ─────────── ① MLP (Residual learner) ───────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ① 공용: MLP / skorch 래퍼
+# ─────────────────────────────────────────────────────────────────────────────
 class TorchMLP(nn.Module):
     """Multi-layer perceptron (ReLU + Dropout)."""
     def __init__(
@@ -48,7 +51,6 @@ class TorchMLP(nn.Module):
         return self.net(x)
 
 
-# ─────────── ② skorch 래퍼 ───────────
 class SafeNet(NeuralNetRegressor):
     """pandas/Series → float32 NumPy 자동 변환 래퍼."""
     def fit(self, X, y=None, **kw):                         # type: ignore[override]
@@ -65,7 +67,9 @@ class SafeNet(NeuralNetRegressor):
         return state
 
 
-# ─────────── ③ Multi-branch residual net ───────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ② Multi-branch residual net
+# ─────────────────────────────────────────────────────────────────────────────
 def _mlp_with_dim(in_dim: int, hidden: Tuple[int, ...], drop: float) -> Tuple[nn.Sequential, int]:
     layers: List[nn.Module] = []
     d = in_dim
@@ -166,8 +170,7 @@ class SafeNetNBranchLR(NeuralNetRegressor):
         if len(lrs) == 1 and n_br > 1:
             lrs = lrs * n_br
         for i in range(n_br):
-            params_i = list(mdl.branch_encoders[i].parameters())
-            params_i += list(mdl.branch_projs[i].parameters())
+            params_i = list(mdl.branch_encoders[i].parameters()) + list(mdl.branch_projs[i].parameters())
             if params_i:
                 groups.append({"params": params_i, "lr": float(lrs[i])})
 
@@ -198,7 +201,9 @@ class SafeNetNBranchLR(NeuralNetRegressor):
         return super().infer(x, **fit_params)
 
 
-# ─────────── ④ ARM: Base + Residual (clone-safe) ───────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ③ ARM: Base + Residual (clone-safe)
+# ─────────────────────────────────────────────────────────────────────────────
 class AdditiveResidualModel(BaseEstimator, RegressorMixin):
     """
     y_hat = [base_on ? f_base(X[base_cols]) : 0] + f_residual(X[feature_cols])
@@ -362,7 +367,9 @@ class AdditiveResidualModel(BaseEstimator, RegressorMixin):
         return -float(np.mean((Ytrue - Yhat) ** 2))
 
 
-# ─────────── ⑤ ARM Strategy (외부 진입점) ───────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ④ ARM Strategy (외부 진입점)
+# ─────────────────────────────────────────────────────────────────────────────
 class ARMStrategy(BaseStrategy):
     """
     Additive Residual Model Strategy
@@ -381,7 +388,7 @@ class ARMStrategy(BaseStrategy):
 
     def __init__(self, core, option: Dict, params_grid=None):
         super().__init__(core, option, params_grid)
-        # 양쪽 네이밍 호환
+        # 프레임워크 네이밍 차이 흡수
         self.option = option
         self.opt = option
 
@@ -402,7 +409,7 @@ class ARMStrategy(BaseStrategy):
         resid_kind = str(opt.get("residual_kind", "mlp")).lower()
 
         if resid_kind == "mlp":
-            # 잔차 입력 차원 계산
+            # 잔차 입력 차원
             if feature_cols:
                 feat_cols = feature_cols
             else:
@@ -488,3 +495,85 @@ class ARMStrategy(BaseStrategy):
         # Grid 접두: arm__residual_model__...
         self.grid = getattr(self, "params_grid", None) or self._DEFAULT_GRID
         return Pipeline([("arm", arm)])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⑤ Simple TorchDNN (레거시 호환/경량)
+# ─────────────────────────────────────────────────────────────────────────────
+class TorchDNNStrategy(BaseStrategy):
+    """
+    가장 단순한 DNN:
+      X -> (scale) -> TorchMLP(SafeNet) -> y
+    - 옵션:
+        scaler: 'standard' | 'minmax' | None (default='standard')
+        hidden: tuple (예: (64,32))
+        dropout: float
+        lr, wd, bs, epochs, patience
+    """
+    _DEFAULT_GRID = {
+        "dnn__module__hidden":          [(32, 16), (64, 32)],
+        "dnn__module__dropout":         [0.0, 0.2],
+        "dnn__optimizer__lr":           [1e-3, 5e-4],
+        "dnn__optimizer__weight_decay": [0.0, 5e-4],
+    }
+
+    def __init__(self, core, option: Dict, params_grid=None):
+        super().__init__(core, option, params_grid)
+        self.option = option
+        self.opt = option
+
+    @staticmethod
+    def _to32():
+        # pandas/Series -> float32 ndarray (sklearn FunctionTransformer용)
+        return FunctionTransformer(
+            lambda z: (
+                z.to_numpy(dtype=np.float32, copy=False)
+                if isinstance(z, (pd.DataFrame, pd.Series))
+                else z.astype(np.float32, copy=False)
+            ),
+            validate=False,
+        )
+
+    def build_pipeline(self) -> Pipeline:
+        opt = getattr(self, "option", None) or getattr(self, "opt", {}) or {}
+        n_out = 1 if self.core.y.ndim == 1 else self.core.y.shape[1]
+
+        # --- 스케일러 선택 ---
+        scaler_choice = str(opt.get("scaler", "standard")).lower()
+        if scaler_choice == "standard":
+            scaler = StandardScaler()
+        elif scaler_choice == "minmax":
+            rng = opt.get("minmax_range", (-1, 1))
+            scaler = MinMaxScaler(rng)
+        else:
+            scaler = None  # 스케일러 미사용
+
+        # --- DNN 본체 ---
+        net = SafeNet(
+            module=TorchMLP,
+            module__num_feat=self.core.X.shape[1],   # 명시적 입력 차원
+            module__num_out=n_out,
+            module__hidden=tuple(opt.get("hidden", (32, 16))),
+            module__dropout=float(opt.get("dropout", 0.1)),
+            optimizer=torch.optim.Adam,
+            optimizer__lr=float(opt.get("lr", 1e-3)),
+            optimizer__weight_decay=float(opt.get("wd", 0.0)),
+            criterion=nn.MSELoss,
+            batch_size=int(opt.get("bs", 32)),
+            max_epochs=int(opt.get("epochs", 100)),
+            train_split=ValidSplit(0.2, stratified=False),
+            callbacks=[EarlyStopping(monitor="valid_loss",
+                                     patience=int(opt.get("patience", 10)),
+                                     threshold=1e-5,
+                                     lower_is_better=True)],
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            verbose=0,
+        )
+
+        steps = [("to32", self._to32())]
+        if scaler is not None:
+            steps.append(("sc", scaler))
+        steps.append(("dnn", net))
+
+        self.grid = getattr(self, "params_grid", None) or self._DEFAULT_GRID
+        return Pipeline(steps)
