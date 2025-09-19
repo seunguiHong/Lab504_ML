@@ -1,19 +1,16 @@
 """
 PyTorch-기반 전략 (ARM: Additive Residual Model)
 ────────────────────────────────────────────────────────────────────
-• TorchMLP              : 단순 feed-forward MLP (residual learner로 사용)
-• MultiBranchNet        : N-branch encoder + softmax gate + head (residual learner)
+• TorchMLP              : 단순 feed-forward MLP (residual learner)
+• MultiBranchNet        : N-branch encoder + softmax gate + head
 • AdditiveResidualModel : Base(선형) + Residual(MLP/Multi-branch)
 • ARMStrategy           : 외부 인터페이스(옵션으로 Base on/off, residual 종류 선택)
 """
 
 from __future__ import annotations
-from .strategies import BaseStrategy          # 외부 프레임워크의 베이스 전략
+from .strategies import BaseStrategy
 
-# ─────────────────────────  공통 IMPORT  ─────────────────────────
-from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple, Optional
-
 import numpy as np
 import pandas as pd
 import torch
@@ -47,7 +44,7 @@ class TorchMLP(nn.Module):
         layers.append(nn.Linear(d, num_out))
         self.net = nn.Sequential(*layers)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # noqa: D401
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
 
@@ -62,8 +59,7 @@ class SafeNet(NeuralNetRegressor):
         return super().fit(X, y, **kw)
 
     def __getstate__(self):
-        state = super().__getstate__()      # skorch 기본 state
-        # 학습 끝난 뒤 무거운 객체 제거(직렬화 안정성)
+        state = super().__getstate__()
         for k in ["history","_dataset_train","_dataset_valid","_optimizer","_criterion","_callbacks"]:
             state.pop(k, None)
         return state
@@ -81,9 +77,7 @@ def _mlp_with_dim(in_dim: int, hidden: Tuple[int, ...], drop: float) -> Tuple[nn
 class MultiBranchNet(nn.Module):
     """
     N-브랜치 인코더 + softmax gate 병합 + head
-    - branches        : List[dict]  ── 각 dict = {"idx": [...], "hidden": (...), "drop": float}
-    - d_merge         : Optional[int] 병합 차원(없으면 브랜치 출력 차원 max, 0-branch면 n_out)
-    - head_hidden     : int         ── head 은닉 크기
+    - branches: List[dict] ─ 각 dict = {"idx": [...], "hidden": (...), "drop": float}
     """
     def __init__(
         self,
@@ -96,7 +90,6 @@ class MultiBranchNet(nn.Module):
         super().__init__()
         self.n_out = n_out
 
-        # 1) 브랜치 인코더
         self.branch_idx:   List[List[int]] = []
         self.branch_encoders = nn.ModuleList()
         self.branch_projs    = nn.ModuleList()
@@ -111,7 +104,6 @@ class MultiBranchNet(nn.Module):
             self.branch_encoders.append(enc)
             out_dims.append(d_out)
 
-        # 2) 병합 차원 & projection
         if len(out_dims) == 0:       # 0-branch 특수처리
             self.d_merge = int(d_merge or n_out)
             self.alpha   = None
@@ -122,7 +114,6 @@ class MultiBranchNet(nn.Module):
                                           else nn.Linear(d, self.d_merge))
             self.alpha = nn.Parameter(torch.zeros(len(branches)))  # softmax gate
 
-        # 3) head
         self.head = nn.Sequential(
             nn.Linear(self.d_merge, head_hidden), nn.ReLU(), nn.Dropout(head_drop),
             nn.Linear(head_hidden, n_out),
@@ -133,19 +124,18 @@ class MultiBranchNet(nn.Module):
         if X.device != dev:
             X = X.to(dev, non_blocking=True)
 
-        # (A) 브랜치 없으면 0-tensor, 있으면 gate 합
         if len(self.branch_encoders) == 0:
             h = X.new_zeros(X.size(0), self.d_merge)
         else:
             zs = []
             for enc, proj, idx in zip(self.branch_encoders, self.branch_projs, self.branch_idx):
                 zi = proj(enc(X[:, idx]))
-                zs.append(zi)                                 # (B, d_merge)
+                zs.append(zi)
             w = torch.softmax(self.alpha, dim=0)             # (R,)
             h = torch.stack(zs, 0)                           # (R,B,d_merge)
-            h = torch.einsum("r, rbd -> bd", w, h)           # gate 합
+            h = torch.einsum("r, rbd -> bd", w, h)
 
-        return self.head(h)                                  # (B, n_out)
+        return self.head(h)
 
 
 class SafeNetNBranchLR(NeuralNetRegressor):
@@ -156,7 +146,7 @@ class SafeNetNBranchLR(NeuralNetRegressor):
         self.lr_br   = lr_br
         self.lr_head = lr_head
 
-    def fit(self, X, y=None, **kw):  # pandas→float32
+    def fit(self, X, y=None, **kw):
         if isinstance(X, (pd.DataFrame, pd.Series)):
             X = X.to_numpy(dtype=np.float32, copy=False)
         if isinstance(y, (pd.DataFrame, pd.Series)):
@@ -171,7 +161,6 @@ class SafeNetNBranchLR(NeuralNetRegressor):
         base_lr = opt_kw.pop("lr", 1e-3)
 
         groups = []
-        # branches
         n_br = len(mdl.branch_encoders)
         lrs = self.lr_br if (self.lr_br and len(self.lr_br) > 0) else [base_lr] * n_br
         if len(lrs) == 1 and n_br > 1:
@@ -182,13 +171,11 @@ class SafeNetNBranchLR(NeuralNetRegressor):
             if params_i:
                 groups.append({"params": params_i, "lr": float(lrs[i])})
 
-        # head + gate(alpha)
         head_params = list(mdl.head.parameters())
         if getattr(mdl, "alpha", None) is not None:
             head_params += [mdl.alpha]
         groups.append({"params": head_params, "lr": float(self.lr_head or base_lr)})
 
-        # skorch 표준 초기화
         if isinstance(self.optimizer, tuple):
             opt_cls, user_kw = self.optimizer
             all_kw = {**opt_kw, **user_kw}
@@ -211,11 +198,11 @@ class SafeNetNBranchLR(NeuralNetRegressor):
         return super().infer(x, **fit_params)
 
 
-# ─────────── ④ ARM: Base + Residual (fixed for sklearn.clone) ───────────
+# ─────────── ④ ARM: Base + Residual (clone-safe) ───────────
 class AdditiveResidualModel(BaseEstimator, RegressorMixin):
     """
     y_hat = [base_on ? f_base(X[base_cols]) : 0] + f_residual(X[feature_cols])
-    - __init__에서는 어떤 파라미터도 변형/복사하지 않음(= sklearn.clone 규칙 준수)
+    - __init__는 전달 파라미터를 변형하지 않음(= sklearn.clone 규칙 준수)
     - 전처리는 fit() 내부에서만 수행
     """
     def __init__(self,
@@ -227,7 +214,6 @@ class AdditiveResidualModel(BaseEstimator, RegressorMixin):
                  feature_cols: Optional[List[str]] = None,
                  standardize_res: bool = True,
                  seed: int = 0):
-        # --- 절대 변형 금지: 전달받은 그대로 저장 ---
         self.base_on = base_on
         self.base_cols = base_cols
         self.target_cols = target_cols
@@ -237,11 +223,13 @@ class AdditiveResidualModel(BaseEstimator, RegressorMixin):
         self.standardize_res = standardize_res
         self.seed = seed
 
-        # fitted state (언더스코어 사용)
+        # fitted state
         self._scaler: Optional[StandardScaler] = None
         self._feat_cols_used: List[str] = []
         self._target_dim: int = 0
         self._nan_info_: Dict[str, int] = {}
+        self._base_model_fitted_ = None
+        self._residual_model_fitted_ = None
 
     # utils
     @staticmethod
@@ -280,18 +268,15 @@ class AdditiveResidualModel(BaseEstimator, RegressorMixin):
         assert isinstance(X, pd.DataFrame), "X must be DataFrame"
         if isinstance(y, pd.Series): y = y.to_frame()
 
-        # --- 로컬에서만 파생값 생성 (원 파라미터는 보존) ---
         target_cols = list(self.target_cols or (list(y.columns) if hasattr(y, "columns") else []))
         base_cols   = list(self.base_cols or [])
         feat_cols   = list(self.feature_cols) if (self.feature_cols is not None and len(self.feature_cols) > 0) else None
 
         self._check_required_cols(X, y, target_cols, base_cols)
 
-        # seed
         np.random.seed(int(self.seed))
         torch.manual_seed(int(self.seed))
 
-        # targets
         Y_df = y[target_cols].copy()
         Y = self._to_2d(Y_df)
         self._target_dim = Y.shape[1]
@@ -302,29 +287,26 @@ class AdditiveResidualModel(BaseEstimator, RegressorMixin):
             Xb = self._to_2d(X[Xb_cols])
         else:
             Xb_cols = []
-            Xb = np.zeros((len(X), 1), dtype=np.float32)  # 마스크 동기화용 dummy
+            Xb = np.zeros((len(X), 1), dtype=np.float32)
 
-        # residual features (ordered)
+        # residual features
         if feat_cols is None:
-            self._feat_cols_used = self._numeric_cols(X)   # 전체 수치형
+            self._feat_cols_used = self._numeric_cols(X)
         else:
             self._feat_cols_used = self._numeric_cols(X, feat_cols)
         Xres = self._to_2d(X[self._feat_cols_used]) if self._feat_cols_used else np.zeros((len(X), 1), np.float32)
 
         # NaN joint mask
         m = self._nan_mask_joint([Xb, Y, Xres])
-        n_drop = int((~m).sum())
-        self._nan_info_ = {"dropped_rows": n_drop}
-        if n_drop > 0:
+        if (~m).any():
             Xb, Y, Xres = Xb[m], Y[m], Xres[m]
 
-        # base_model: None이면 로컬 디폴트 생성 (원 파라미터 보존)
+        # base_model: None이면 로컬 디폴트 생성
         base_model = self.base_model if self.base_model is not None else LinearRegression()
 
         # base fit & residual target
         if self.base_on:
             base_model.fit(Xb, Y)
-            # fitted state로 보관(학습 후에만)
             self._base_model_fitted_ = base_model
             Y_base = base_model.predict(Xb).astype(np.float32, copy=False)
             U = Y - Y_base
@@ -340,11 +322,10 @@ class AdditiveResidualModel(BaseEstimator, RegressorMixin):
             self._scaler = None
             Z = Xres
 
-        # residual fit (원 파라미터 self.residual_model은 변형하지 않음)
+        # residual fit
         if (self.residual_model is None) or (Z.shape[1] == 0):
             self._residual_model_fitted_ = None
         else:
-            # clone 필요 없음: 외부 GridSearch가 clone을 담당
             self.residual_model.fit(Z, U)
             self._residual_model_fitted_ = self.residual_model
 
@@ -352,7 +333,7 @@ class AdditiveResidualModel(BaseEstimator, RegressorMixin):
 
     # predict
     def _predict_base(self, X: pd.DataFrame) -> np.ndarray:
-        if not self.base_on or getattr(self, "_base_model_fitted_", None) is None:
+        if not self.base_on or self._base_model_fitted_ is None:
             return np.zeros((len(X), self._target_dim), dtype=np.float32)
         Xb = self._to_2d(X[self._numeric_cols(X, list(self.base_cols or []))])
         if not np.isfinite(Xb).all():
@@ -360,7 +341,7 @@ class AdditiveResidualModel(BaseEstimator, RegressorMixin):
         return self._base_model_fitted_.predict(Xb).astype(np.float32, copy=False)
 
     def _predict_residual(self, X: pd.DataFrame) -> np.ndarray:
-        mdl = getattr(self, "_residual_model_fitted_", None)
+        mdl = self._residual_model_fitted_
         if (mdl is None) or (len(self._feat_cols_used) == 0):
             return np.zeros((len(X), self._target_dim), dtype=np.float32)
         Xr = self._to_2d(X[self._feat_cols_used])
@@ -375,83 +356,10 @@ class AdditiveResidualModel(BaseEstimator, RegressorMixin):
         return self._predict_base(X) + self._predict_residual(X)
 
     def score(self, X: pd.DataFrame, y: pd.DataFrame) -> float:
-        Ytrue = (y if isinstance(y, pd.DataFrame) else y.to_frame())[list(self.target_cols or y.columns)].to_numpy(dtype=np.float32, copy=False)
+        y_df = (y if isinstance(y, pd.DataFrame) else y.to_frame())
+        Ytrue = y_df[list(self.target_cols or y_df.columns)].to_numpy(dtype=np.float32, copy=False)
         Yhat = self.predict(X)
         return -float(np.mean((Ytrue - Yhat) ** 2))
-
-#------------Vanilla DNN Strategy ----------------
-class TorchDNNStrategy(BaseStrategy):
-    """
-    가장 단순한 DNN:
-      X -> (scale) -> TorchMLP(SafeNet) -> y
-    - 옵션:
-        scaler: 'standard' | 'minmax' | None (default='standard')
-        hidden: tuple (예: (64,32))
-        dropout: float
-        lr, wd, bs, epochs, patience
-    """
-    _DEFAULT_GRID = {
-        "dnn__module__hidden":          [(32, 16), (64, 32)],
-        "dnn__module__dropout":         [0.0, 0.2],
-        "dnn__optimizer__lr":           [1e-3, 5e-4],
-        "dnn__optimizer__weight_decay": [0.0, 5e-4],
-    }
-
-    @staticmethod
-    def _to32():
-        # pandas/Series -> float32 ndarray (sklearn FunctionTransformer용)
-        return FunctionTransformer(
-            lambda z: (
-                z.to_numpy(dtype=np.float32, copy=False)
-                if isinstance(z, (pd.DataFrame, pd.Series))
-                else z.astype(np.float32, copy=False)
-            ),
-            validate=False,
-        )
-
-    def build_pipeline(self) -> Pipeline:
-        opt = getattr(self, "option", None) or getattr(self, "opt", {}) or {}
-        n_out = 1 if self.core.y.ndim == 1 else self.core.y.shape[1]
-
-        # --- 스케일러 선택 ---
-        scaler_choice = str(opt.get("scaler", "standard")).lower()
-        if scaler_choice == "standard":
-            scaler = StandardScaler()
-        elif scaler_choice == "minmax":
-            rng = opt.get("minmax_range", (-1, 1))
-            scaler = MinMaxScaler(rng)
-        else:
-            scaler = None  # 스케일러 미사용
-
-        # --- DNN 본체 ---
-        net = SafeNet(
-            module=TorchMLP,
-            module__num_feat=self.core.X.shape[1],   # 고정 크기 사용(명시적)
-            module__num_out=n_out,
-            module__hidden=tuple(opt.get("hidden", (32, 16))),
-            module__dropout=float(opt.get("dropout", 0.1)),
-            optimizer=torch.optim.Adam,
-            optimizer__lr=float(opt.get("lr", 1e-3)),
-            optimizer__weight_decay=float(opt.get("wd", 0.0)),
-            criterion=nn.MSELoss,
-            batch_size=int(opt.get("bs", 32)),
-            max_epochs=int(opt.get("epochs", 100)),
-            train_split=ValidSplit(0.2, stratified=False),
-            callbacks=[EarlyStopping(monitor="valid_loss",
-                                     patience=int(opt.get("patience", 10)),
-                                     threshold=1e-5,
-                                     lower_is_better=True)],
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            verbose=0,
-        )
-
-        steps = [("to32", self._to32())]
-        if scaler is not None:
-            steps.append(("sc", scaler))
-        steps.append(("dnn", net))
-
-        self.grid = getattr(self, "params_grid", None) or self._DEFAULT_GRID
-        return Pipeline(steps)
 
 
 # ─────────── ⑤ ARM Strategy (외부 진입점) ───────────
@@ -471,6 +379,12 @@ class ARMStrategy(BaseStrategy):
         "arm__residual_model__optimizer__weight_decay": [0.0, 5e-4],
     }
 
+    def __init__(self, core, option: Dict, params_grid=None):
+        super().__init__(core, option, params_grid)
+        # 양쪽 네이밍 호환
+        self.option = option
+        self.opt = option
+
     def build_pipeline(self) -> Pipeline:
         opt: Dict[str, Any] = getattr(self, "option", None) or getattr(self, "opt", {}) or {}
 
@@ -478,7 +392,7 @@ class ARMStrategy(BaseStrategy):
         base_cols: List[str] = list(opt.get("base_cols", []))
         target_cols: List[str] = list(opt.get("target_cols", []))
         feature_cols: List[str] = list(opt.get("feature_cols", []))
-        base_model: Any = opt.get("base_model", LinearRegression())
+        base_model: Any = opt.get("base_model", None)  # __init__에서 None 유지(클론 안전)
         seed: int = int(opt.get("seed", 0))
 
         # 멀티타깃 차원
@@ -488,9 +402,17 @@ class ARMStrategy(BaseStrategy):
         resid_kind = str(opt.get("residual_kind", "mlp")).lower()
 
         if resid_kind == "mlp":
+            # 잔차 입력 차원 계산
+            if feature_cols:
+                feat_cols = feature_cols
+            else:
+                feat_cols = [c for c in self.core.X.columns
+                             if np.issubdtype(self.core.X[c].dtype, np.number)]
+            n_feat_res = len(feat_cols)
+
             residual_model = SafeNet(
                 module=TorchMLP,
-                module__num_feat=None,              # 첫 배치에서 자동 유추
+                module__num_feat=n_feat_res,              # 반드시 정수
                 module__num_out=n_out,
                 module__hidden=tuple(opt.get("mlp_hidden", (32, 16))),
                 module__dropout=float(opt.get("mlp_dropout", 0.1)),
@@ -514,7 +436,8 @@ class ARMStrategy(BaseStrategy):
             if feature_cols:
                 feat_cols = feature_cols
             else:
-                feat_cols = [c for c in self.core.X.columns if np.issubdtype(self.core.X[c].dtype, np.number)]
+                feat_cols = [c for c in self.core.X.columns
+                             if np.issubdtype(self.core.X[c].dtype, np.number)]
             name2idx = {c: i for i, c in enumerate(feat_cols)}
 
             branches_cfg: List[Dict[str, Any]] = opt.get("branches", [])
@@ -553,10 +476,10 @@ class ARMStrategy(BaseStrategy):
 
         arm = AdditiveResidualModel(
             base_on=base_on,
-            base_cols=base_cols,
+            base_cols=base_cols,               # __init__에서 변형하지 않음
             target_cols=target_cols,
             residual_model=residual_model,
-            base_model=base_model,
+            base_model=base_model,             # None이면 fit에서 LinearRegression() 생성
             feature_cols=(feature_cols if feature_cols else None),
             standardize_res=bool(opt.get("standardize_res", True)),
             seed=seed,
