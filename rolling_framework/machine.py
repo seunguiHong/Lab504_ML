@@ -10,7 +10,6 @@ from .strategies import STRATEGIES
 
 
 class Machine(DatasetMixin, AnalyticsMixin):
-    """고수준 롤링-윈도우 학습 엔진."""
 
     def __init__(
         self,
