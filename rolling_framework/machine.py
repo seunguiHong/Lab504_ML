@@ -109,61 +109,77 @@ class Machine(DatasetMixin, AnalyticsMixin):
     # ──────────────────────────────────────────────────────────────────────
     def R2OOS(
         self,
-        per_maturity: bool = True,
-        baseline: str = "naive",
-        cs_path: Optional[str] = None,
+        baseline: str = "naive",                 # "naive" | "cs_yhat" | "condmean"
+        cs_path: Optional[str] = None,           # data/cs_yhat.csv 경로
+        cs_df: Optional[pd.DataFrame] = None,    # 이미 로드해 넘길 수도 있음
+        per_maturity: bool = True,               # True면 만기별 Series 반환, False면 평균 스칼라
     ):
         """
-        Compute out-of-sample R²:
-
-            R2_OOS = 1 - SSE(model) / SSE(baseline)
-
-        Baselines:
-          • "naive"    : denominator = || y ||^2
-          • "cs_yhat"  : denominator = || y - cs_yhat ||^2
-          • "condmean" : denominator = || y - mean_t(cs_yhat) ||^2
-                          (cross-sectional mean at each time t, repeated across maturities)
-
-        Assumptions:
-          • If baseline uses cs_yhat, the CSV at `cs_path` is pre-aligned to OOS dates
-            and has identical columns to y (no internal shifting here).
+        R2_OOS = 1 - sum_t ||y_t - yhat_t||^2 / sum_t ||y_t - b_t||^2
+          - baseline='naive'   : b_t = 0
+          - baseline='cs_yhat' : b_t = cs_yhat[t, :]
+          - baseline='condmean': b_t = mean_j cs_yhat[t, j] (단면 평균, 모든 만기에 동일값)
+        가정: 데이터는 사전에 시간 정렬/정합(alignment) 되어 있음.
         """
-        Y_true, Y_pred = self._collect_oos_frames()
-        if Y_true.empty or Y_pred.empty:
-            return np.nan if not per_maturity else pd.Series(dtype=float, index=self.targets)
-
-        # Ensure same ordering as self.targets for readability
-        Y_true = Y_true.reindex(columns=self.targets)
-        Y_pred = Y_pred.reindex(columns=self.targets)
-
-        # Numerator
-        sse_model = ((Y_true - Y_pred) ** 2).sum(axis=0, min_count=1)
-
-        b = str(baseline).lower()
-        if b == "naive" or cs_path is None:
-            # denominator = || y ||^2
-            sse_base = (Y_true ** 2).sum(axis=0, min_count=1)
-        else:
-            cs = pd.read_csv(cs_path, index_col="Time")
-            # Hard align; no shift or offset applied
-            cs = cs.reindex(index=Y_true.index, columns=Y_true.columns)
-
-            if b == "cs_yhat":
-                base = cs
-            elif b == "condmean":
-                mu = cs.mean(axis=1)  # time-t cross-sectional mean
-                base = pd.DataFrame(
-                    np.repeat(mu.values.reshape(-1, 1), len(Y_true.columns), axis=1),
-                    index=Y_true.index, columns=Y_true.columns
-                )
+        targets = self.targets                     # ex) ["xr_2", ...]
+        # ----- 1) cs_yhat 준비 (필요할 때만) -----
+        cs = None
+        if baseline in ("cs_yhat", "condmean"):
+            if cs_df is not None:
+                cs = cs_df.copy()
+            elif cs_path is not None:
+                cs = pd.read_csv(cs_path, index_col="Time")
             else:
-                # Fallback to naive if unknown baseline
-                base = pd.DataFrame(0.0, index=Y_true.index, columns=Y_true.columns)
+                # 경로/데이터 미제공이면 cs-기반 R2는 계산 불가 → 전부 NaN 반환
+                return pd.Series(np.nan, index=targets) if per_maturity else float("nan")
 
-            sse_base = ((Y_true - base) ** 2).sum(axis=0, min_count=1)
+            # 인덱스/열 정합: 인덱스는 문자열 YYYYMM, 열은 targets 순서
+            cs.index = cs.index.astype(str)
+            y_index = self.y.index.astype(str)
+            cs = cs.reindex(index=y_index, columns=targets)
 
-        r2 = 1.0 - (sse_model / sse_base.replace(0.0, np.nan))
-        return r2 if per_maturity else float(np.nanmean(r2.values))
+        # ----- 2) 누적 제곱합 초기화 -----
+        ss_res_tot = pd.Series(0.0, index=targets)  # 분자: (y - yhat)^2
+        ss_tot_tot = pd.Series(0.0, index=targets)  # 분모: (y - baseline)^2
+
+        # ----- 3) 테스트 구간 루프 -----
+        for ds in self.test_dates:
+            ds = str(ds)  # 날짜 키를 문자열로 통일
+
+            # 예측/실측 꺼내기
+            if ds not in self.rec.oos_pred or ds not in self.y.index:
+                continue
+            yt = self.y.loc[ds]                    # Series (targets)
+            yp = self.rec.oos_pred[ds].loc[ds]     # Series (targets)
+
+            # baseline 벡터 만들기
+            if baseline == "naive":
+                bench = pd.Series(0.0, index=targets)
+            elif baseline == "cs_yhat":
+                if ds not in cs.index:
+                    # 해당 날짜 cs가 없으면 스킵
+                    continue
+                bench = cs.loc[ds]                  # Series (targets)
+            elif baseline == "condmean":
+                if ds not in cs.index:
+                    continue
+                m = float(np.nanmean(cs.loc[ds].to_numpy(dtype=float)))  # 단면 평균
+                bench = pd.Series(m, index=targets)
+            else:
+                raise ValueError("baseline must be 'naive', 'cs_yhat', or 'condmean'.")
+
+            # 증분 제곱오차 계산 (NaN은 0으로 무시하고 누적)
+            inc_res = ((yt - yp) ** 2).reindex(targets).astype(float).fillna(0.0)
+            inc_tot = ((yt - bench) ** 2).reindex(targets).astype(float).fillna(0.0)
+
+            ss_res_tot = ss_res_tot.add(inc_res, fill_value=0.0)
+            ss_tot_tot = ss_tot_tot.add(inc_tot, fill_value=0.0)
+
+        # ----- 4) R2_OOS 계산 -----
+        denom = ss_tot_tot.replace(0.0, np.nan)  # 분모 0이면 NaN 처리
+        r2 = 1.0 - (ss_res_tot / denom)
+
+        return r2 if per_maturity else float(np.nanmean(r2.to_numpy(dtype=float)))
 
     # ──────────────────────────────────────────────────────────────────────
     # Convenience proxies to Recorder
