@@ -94,17 +94,17 @@ class PenalizedStrategy(BaseStrategy):
 
 class TreeStrategy(BaseStrategy):
     _BASES = {
-        "XGB":          XGBRegressor,
-        "RandomForest": RandomForestRegressor,
-        "ExtremeTrees": ExtraTreesRegressor,
-        "EBM":          ExplainableBoostingRegressor,
+        "xgb":          XGBRegressor,
+        "rf": RandomForestRegressor,
+        "et": ExtraTreesRegressor,
+        "ebm":          ExplainableBoostingRegressor,
     }
 
     def build_pipeline(self):
         base_cls = self._BASES[self.opt]
 
         # --- 1) 원본 추정기 ---------------------------------
-        if self.opt == "XGB":
+        if self.opt == "xgb":
             base_est = base_cls(
                 n_jobs      = -1,
                 random_state= self.core.random_state,

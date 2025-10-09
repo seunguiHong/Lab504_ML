@@ -104,99 +104,99 @@ class Machine(DatasetMixin, AnalyticsMixin):
         cols = Y_true.columns.intersection(Y_pred.columns)
         return Y_true.loc[idx, cols], Y_pred.loc[idx, cols]
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Out-of-sample R² with clean baselines (no shift)
-    # ──────────────────────────────────────────────────────────────────────
-    def R2OOS(
-        self,
-        baseline: str = "naive",                 # "naive" | "cs_yhat" | "condmean"
-        cs_path: Optional[str] = None,           # path to data/cs_yhat.csv (for baseline="cs_yhat")
-        cs_df: Optional[pd.DataFrame] = None,    # or pass a preloaded DataFrame
-        per_maturity: bool = True,               # True: return Series by maturity, False: scalar mean
-    ):
+    def R2OOS(self, baseline: str = "naive", cs_path: str = None):
         """
-        R2_OOS = 1 - sum_t ||y_t - ŷ_t||^2 / sum_t ||y_t - b_t||^2
+        Minimal, robust R²_OOS by maturity:
+        R² = 1 - Σ_t (y_t - ŷ_t)² / Σ_t (y_t - b_t)²
 
-        baselines:
-          - naive    : b_t = 0  (vector of zeros)
-          - condmean : b_t = time-series mean of y up to t-1 (per-maturity historical mean)
-          - cs_yhat  : b_t = external cross-sectional baseline at time t (load from cs_yhat)
-
-        Assumptions:
-          - Data are already aligned externally (no internal shifting here).
+        baseline:
+        - "naive"    : b_t = 0
+        - "condmean" : b_t = (각 만기별 과거 평균 up to t-1) = expanding mean 후 shift(1)
+        - "cs_yhat"  : b_t = 외부 cs_yhat[t, maturity] (csv 제공)
+        Assumptions: training() 완료, Recorder에 OOS 예측 존재.
         """
-        targets = self.targets  # e.g., ["xr_2", "xr_3", ...]
-        y_all = self.y
 
-        # ----- (optional) cs_yhat ready only if needed -----
-        cs = None
-        if baseline == "cs_yhat":
-            if cs_df is not None:
-                cs = cs_df.copy()
-            elif cs_path is not None:
-                cs = pd.read_csv(cs_path, index_col="Time")
-            else:
-                # No cs provided → cannot compute CS baseline
-                return pd.Series(np.nan, index=targets) if per_maturity else float("nan")
+        targets = list(self.targets)
 
-            # align to y: same index (as str) and same columns (targets)
-            cs.index = cs.index.astype(str)
-            y_index = y_all.index.astype(str)
-            cs = cs.reindex(index=y_index, columns=targets)
-
-        # ----- accumulators -----
-        ss_res_tot = pd.Series(0.0, index=targets)  # numerator: sum ||y - ŷ||^2
-        ss_tot_tot = pd.Series(0.0, index=targets)  # denom   : sum ||y - b||^2
-
-        # ----- loop over test dates -----
+        # 1) 수집: test_dates에서 실측/예측 둘 다 있는 행만 모은다.
+        rows_true, rows_pred = [], []
         for ds in self.test_dates:
-            ds = str(ds)
-            if ds not in y_all.index or ds not in self.rec.oos_pred:
+            k = str(ds)
+            if (k not in self.y.index) or (k not in self.rec.oos_pred):
                 continue
 
-            # y_t
-            yt = y_all.loc[ds].reindex(targets).astype(float)
+            yt = self.y.loc[k]
+            yp_obj = self.rec.oos_pred[k]
+            yp = yp_obj.loc[k] if isinstance(yp_obj, pd.DataFrame) and (k in yp_obj.index) else yp_obj
+            yt = yt.reindex(targets)
+            yp = yp.reindex(targets)
 
-            # ŷ_t (accept Series or 1-row DataFrame)
-            yp_obj = self.rec.oos_pred[ds]
-            if isinstance(yp_obj, pd.DataFrame):
-                if ds in yp_obj.index:
-                    yp = yp_obj.loc[ds]
-                else:
-                    yp = yp_obj.squeeze()
-            else:
-                yp = yp_obj
-            yp = pd.Series(yp, index=targets, dtype=float)
+            # 실측/예측에 NaN이 섞인 행은 스킵 (필요시 제거)
+            if yt.isna().any() or yp.isna().any():
+                continue
 
-            # baseline b_t
-            if baseline == "naive":
-                bench = pd.Series(0.0, index=targets)
-            elif baseline == "condmean":
-                # historical mean up to t-1, per maturity
-                hist = y_all.loc[:ds].iloc[:-1]  # strictly before t
-                if hist.empty:
-                    # no history yet → skip this t
-                    continue
-                bench = hist.mean().reindex(targets).astype(float)
-            elif baseline == "cs_yhat":
-                if cs is None or ds not in cs.index:
-                    continue
-                bench = cs.loc[ds].reindex(targets).astype(float)
-            else:
-                raise ValueError("baseline must be 'naive', 'condmean', or 'cs_yhat'.")
+            rows_true.append(yt.astype(float))
+            rows_pred.append(yp.astype(float))
 
-            # accumulate squared errors (ignore NaN by filling 0)
-            inc_res = ((yt - yp) ** 2).fillna(0.0)
-            inc_tot = ((yt - bench) ** 2).fillna(0.0)
+        if not rows_true:
+            # 유효한 테스트 행이 하나도 없으면 만기별 NaN 반환
+            return pd.Series(np.nan, index=targets)
 
-            ss_res_tot = ss_res_tot.add(inc_res, fill_value=0.0)
-            ss_tot_tot = ss_tot_tot.add(inc_tot, fill_value=0.0)
+        Y_true = pd.DataFrame(rows_true)
+        Y_pred = pd.DataFrame(rows_pred)
+        # 인덱스/컬럼 정렬(방어적)
+        idx = Y_true.index
+        cols = targets
+        Y_pred = Y_pred.reindex(index=idx, columns=cols)
 
-        # ----- final R2 -----
-        denom = ss_tot_tot.replace(0.0, np.nan)
-        r2 = 1.0 - (ss_res_tot / denom)
+        # 2) baseline 구성
+        if baseline == "naive":
+            # 항상 유효
+            B = pd.DataFrame(0.0, index=idx, columns=cols)
+            valid_mask = pd.Series(True, index=idx)
 
-        return r2 if per_maturity else float(np.nanmean(r2.to_numpy(dtype=float)))
+        elif baseline == "condmean":
+            # 각 만기별의 과거 평균 → shift(1)로 t시점 정보 누설 방지
+            B_full = Y_true.expanding(min_periods=1).mean().shift(1)
+            # baseline이 NaN인 초기 행 제거
+            valid_mask = ~B_full.isna().any(axis=1)
+            if not valid_mask.any():
+                return pd.Series(np.nan, index=cols)
+            B = B_full.loc[valid_mask]
+            Y_true = Y_true.loc[valid_mask]
+            Y_pred = Y_pred.loc[valid_mask]
+
+        elif baseline == "cs_yhat":
+            if cs_path is None:
+                raise ValueError("baseline='cs_yhat' requires cs_path")
+            cs = pd.read_csv(cs_path, index_col="Time")
+
+            # 인덱스/열 정규화
+            cs.index = (cs.index.astype(str)
+                                .str.replace(r"[\-\/\s]", "", regex=True))
+            cs = cs[~cs.index.duplicated(keep="last")]
+            cs.columns = [str(c).strip() for c in cs.columns]
+
+            # y와 같은 축으로 reindex (결측은 NaN)
+            cs = cs.reindex(index=idx, columns=cols).astype(float)
+
+            # baseline이 모두 존재하는 행만 사용 (만기별 모두 유효)
+            valid_mask = ~cs.isna().any(axis=1)
+            if not valid_mask.any():
+                return pd.Series(np.nan, index=cols)
+            B = cs.loc[valid_mask]
+            Y_true = Y_true.loc[valid_mask]
+            Y_pred = Y_pred.loc[valid_mask]
+
+        else:
+            raise ValueError("baseline must be 'naive', 'condmean', or 'cs_yhat'")
+
+        # 3) R² 계산 (만기별 Series 반환)
+        num = ((Y_true - Y_pred) ** 2).sum(axis=0)
+        den = ((Y_true - B)     ** 2).sum(axis=0)
+
+        r2 = 1.0 - num / den.replace(0.0, np.nan)
+        return r2
 
     # ──────────────────────────────────────────────────────────────────────
     # Convenience proxies to Recorder
