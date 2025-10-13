@@ -86,4 +86,10 @@ class ExpandingRunner:
         }
         r2 = self.R2OOS(baseline=baseline, benchmark=benchmark)
         out["R2OOS"] = r2.to_numpy(float)
+
+        # ---- NEW: custom baseline 저장 (예: CS OLS) ----
+        if benchmark is not None:
+            bench = benchmark.loc[Y_true.index, Y_true.columns].astype(float)
+            out["Y_cs_hat"] = bench.to_numpy(float)   # ← 추가
+
         savemat(path, out)
