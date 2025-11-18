@@ -133,6 +133,24 @@ class ExpandingRunner:
         Compute out-of-sample R^2 for each target column.
         """
         Y_true, Y_pred = self.collect_frames()
+
+        if baseline == "condmean":
+            # 1. Compute expanding mean using the FULL history (self.y),
+            #    not just the realized test window.
+            full_hist_mean = self.y.loc[:, self.strategy.target_cols].expanding(min_periods=1).mean()
+
+            # 2. Shift by 1 to avoid look-ahead bias.
+            #    The benchmark for time t must rely only on data available up to t-1.
+            full_hist_mean = full_hist_mean.shift(1)
+
+            # 3. Slice to match the realized test indices.
+            #    This aligns the historical mean with the specific OOS dates.
+            benchmark_df = full_hist_mean.loc[Y_true.index]
+
+            # 4. Pass this calculated history as a 'custom' benchmark to the utility function.
+            return r2_oos(Y_true, Y_pred, baseline="custom", benchmark=benchmark_df)
+
+        # For 'naive' or explicit 'custom' inputs, pass through as is.
         return r2_oos(Y_true, Y_pred, baseline=baseline, benchmark=benchmark)
 
     # Authors Comments : It doesn't need to split, but it's fine as is.
