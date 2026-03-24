@@ -1,8 +1,0 @@
-pandas
-tqdm
-statsmodels
-scikit-learn
-xgboost
-interpret
-skorch
-torch
