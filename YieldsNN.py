@@ -63,9 +63,9 @@ BASE_CONFIG = {
 
 SWEEP_GRID = {
     "archi": [[3,3]],
-    "Dropout": [[0.0]],
-    "l1l2": [[1e-4, 1e-3]],
-    "learning_rate": [0.03],
+    "Dropout": [[0.0], [0.1, 0.3]],
+    "l1l2": [[1e-4, 1e-3], [0.0], [1e-2, 1e-3]],
+    "learning_rate": [0.03, 0.02],
 }
 
 

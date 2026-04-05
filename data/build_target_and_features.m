@@ -1,43 +1,8 @@
-% =========================================================================
-% Date      : 2026-03-12
-% Input     : dataset.csv
-% Output    : target_and_features.mat
-% Objective : Save grouped predictors X.* (decimals) and targets y.* (percent)
-%             in a Python-friendly -v7 MAT format.
-%
-% Conventions
-%   - Yield columns m001..m360 are assumed to be in percent units in CSV.
-%   - X.* is stored in decimals.
-%   - y.* is stored in percent.
-%   - Annual nodes are m012..m120 (1y..10y) in decimals.
-%   - X.fwd includes fwd_1 = m012 (1y zero rate) in decimals.
-%   - X.slopechg stores annual changes in slope:
-%       ds_n(t) = s_n(t) - s_n(t-12),  n = 2..10
-%       where s_n(t) = y_t^(n) - y_t^(1)
-%   - X.dy_pc stores PC1-PC3 extracted from dy over m001..m120, where
-%       dy_m(t) = y_t^(m) - y_{t-12}^(m),  m = 1,...,120
-%     and the PCA at time t is estimated using only rows available up to t.
-%   - X.dy_pc1, X.dy_pc2, X.dy_pc3 store the individual PC scores as
-%     separate one-column feature groups.
-%   - Target y.dy is the 12m-ahead same constant-maturity yield change:
-%       dy_n(t) = y_{t+12}^{(n)} - y_t^{(n)}, n = 1..10
-%
-% Save format
-%   - Each group is a plain struct with fields:
-%       .Time
-%       .data
-%       .names
-%   - Saved with -v7 for direct scipy.io.loadmat compatibility.
-% =========================================================================
-
 function build_target_and_features(in_csv, out_mat)
 
     if nargin < 1 || isempty(in_csv),  in_csv = 'dataset.csv'; end
     if nargin < 2 || isempty(out_mat), out_mat = 'target_and_features.mat'; end
 
-    % ---------------------------
-    % 1) Load raw CSV
-    % ---------------------------
     opts = detectImportOptions(in_csv, 'VariableNamingRule', 'preserve');
     raw  = readtable(in_csv, opts);
 
@@ -48,60 +13,40 @@ function build_target_and_features(in_csv, out_mat)
 
     Time = raw.Time(:);
 
-    % ---------------------------
-    % 2) Yields: m001..m360
-    % ---------------------------
     y_mask = ~cellfun('isempty', regexp(vn, '^m\d{3}$', 'once'));
     if sum(y_mask) < 120
         error("Insufficient yield columns: need at least m001..m120.");
     end
 
     T_Yields = raw(:, y_mask);
-    Y_all    = table2array(T_Yields) / 100;   % percent -> decimal
+    Y_all    = table2array(T_Yields) / 100;
 
     if size(Y_all, 2) < 120
         error("Yield matrix has fewer than 120 monthly maturities.");
     end
 
-    % Annual nodes: 1y..10y from m012..m120 (decimals)
-    y_annual = Y_all(:, 12:12:120);   % T x 10
+    y_annual = Y_all(:, 12:12:120);
+    y_120    = Y_all(:, 1:120);
 
-    % Monthly nodes: m001..m120 for dy-PCA
-    y_120 = Y_all(:, 1:120);          % T x 120
-
-    % ---------------------------
-    % 3) Derived features
-    % ---------------------------
-    % Slope: s_n = y(n) - y(1), n = 2..10
     S = y_annual(:, 2:end) - y_annual(:, 1);
 
-    % Annual slope change: ds_n(t) = s_n(t) - s_n(t-12), n = 2..10
     S_chg = NaN(size(S));
     if size(S, 1) > 12
         S_chg(13:end, :) = S(13:end, :) - S(1:end-12, :);
     end
 
-    % Forward: fwd_n = n*y(n) - (n-1)*y(n-1), n = 2..10
     n_vec = 2:10;
     FWD   = y_annual(:, 2:end) .* n_vec - y_annual(:, 1:end-1) .* (n_vec - 1);
+    rf12  = y_annual(:, 1);
 
-    % 1y zero rate
-    rf12 = y_annual(:, 1);
-
-    % dy over m001..m120: dy_m(t) = y_t^(m) - y_{t-12}^(m)
     T = size(y_120, 1);
     DY_120 = NaN(T, 120);
     if T > 12
         DY_120(13:end, :) = y_120(13:end, :) - y_120(1:end-12, :);
     end
 
-    % Expanding-window PCA scores from DY_120
-    % At time t, PCA is estimated using only rows 13:t.
-    % PCA is implemented via SVD to avoid unnecessary TSQUARED computation.
     DY_PC = NaN(T, 3);
     prev_V = [];
-
-    % Minimum number of training rows before extracting PCs
     min_obs_pca = 24;
 
     for t = 13:T
@@ -130,7 +75,6 @@ function build_target_and_features(in_csv, out_mat)
 
         V_use = V(:, 1:n_keep);
 
-        % Sign alignment for time-series consistency
         if ~isempty(prev_V)
             n_align = min(size(prev_V, 2), size(V_use, 2));
             for k = 1:n_align
@@ -150,9 +94,6 @@ function build_target_and_features(in_csv, out_mat)
     DY_PC2 = DY_PC(:, 2);
     DY_PC3 = DY_PC(:, 3);
 
-    % ---------------------------
-    % 4) External columns
-    % ---------------------------
     T_Ext  = raw(:, ~y_mask & vn ~= "Time");
     ext_vn = string(T_Ext.Properties.VariableNames);
 
@@ -160,21 +101,12 @@ function build_target_and_features(in_csv, out_mat)
     is_macropc = ~cellfun('isempty', regexp(ext_vn, '^F\d+(\^3)?$', 'once'));
     is_macro   = ~(is_iv | is_macropc);
 
-    % ---------------------------
-    % 5) Target: 12m-ahead same-maturity yield change
-    % ---------------------------
-    % Keep both dy_1 and dy_10, so targets span 1y..10y.
-    DY_dec = NaN(T, 10);
-
+    DY_dec = NaN(T, 9);
     if T > 12
-        DY_dec(1:T-12, :) = y_annual(13:T, 1:10) - y_annual(1:T-12, 1:10);
+        DY_dec(1:T-12, :) = y_annual(13:T, 1:9) - y_annual(1:T-12, 1:9);
     end
+    DY_pct = 100 * DY_dec;
 
-    DY_pct = 100 * DY_dec;  % decimal -> percent
-
-    % ---------------------------
-    % 6) Assemble outputs
-    % ---------------------------
     X = struct();
     y = struct();
 
@@ -227,26 +159,14 @@ function build_target_and_features(in_csv, out_mat)
 
     y.dy.Time  = Time;
     y.dy.data  = DY_pct;
-    y.dy.names = cellstr(compose('dy_%d', 1:10));
+    y.dy.names = cellstr(compose('dy_%d', 1:9));
 
-    % ---------------------------
-    % 7) Metadata
-    % ---------------------------
     meta = struct();
     meta.in_csv  = char(in_csv);
     meta.out_mat = char(out_mat);
     meta.X_units = 'decimals';
     meta.y_units = 'percent';
-    meta.note = ['Saved with -v7. Each group has fields Time, data, names. ' ...
-                 'X.fwd.data includes fwd_1 = m012 in decimals. ' ...
-                 'X.slopechg.data stores 12-month slope changes in decimals. ' ...
-                 'X.dy_pc.data stores expanding-window PCA scores from dy over m001..m120. ' ...
-                 'X.dy_pc1, X.dy_pc2, X.dy_pc3 store individual PC scores. ' ...
-                 'y.dy.data stores 12m-ahead same constant-maturity yield changes in percent for dy_1 through dy_10.'];
 
-    % ---------------------------
-    % 8) Save
-    % ---------------------------
     save(out_mat, 'X', 'y', 'meta', '-v7');
 
 end
