@@ -46,21 +46,25 @@ BASE_CONFIG = {
 }
 
 SWEEP_GRID = {
-    "model_name": ["Ridge", "Lasso", "ElasticNet"],
-    "alpha": [1e-4, 1e-3, 1e-2, 1e-1, 1.0],
-    "l1_ratio": [0.2, 0.5, 0.8],
+    "model_name": [["Ridge"], ["Lasso"], ["ElasticNet"], ["Ridge", "Lasso", "ElasticNet"]],
+    "alpha": [[1e-4, 1e-3], [1e-4, 1.0, 1e2]],
+    "l1_ratio": [[0.2, 0.5], [0.2, 0.5, 0.8]],
 }
 
 
 def _glm_result_name(cfg, sweep=False):
-    p = cfg["params"]
     target = cfg["target_group"]
     feat = cfg["run_tag"]
     horizon = f"h{cfg['horizon']}"
 
     if sweep:
-        return "__".join(["sweep", target, feat, "GLM", horizon])
+        cand = cfg["candidate_grid"]
+        model_tag = "-".join(cand["model_name"])
+        alpha_tag = "a" + "_".join(f"{float(v):g}" for v in cand["alpha"])
+        l1r_tag = "l1r" + "_".join(f"{float(v):g}" for v in cand["l1_ratio"])
+        return "__".join(["sweep", target, feat, "GLM", horizon, model_tag, alpha_tag, l1r_tag])
 
+    p = cfg["params"]
     model = p["model_name"]
     alpha = f"a{float(p['alpha']):g}"
     std = "std1" if bool(p["standardize"]) else "std0"
@@ -149,6 +153,21 @@ def _validation_mse(X_train, Y_train, params, validation_split):
     return float(np.mean((Y_val - Y_val_hat) ** 2))
 
 
+def _build_inner_candidates(base_params, candidate_grid):
+    candidates = []
+
+    for combo in ParameterGrid(candidate_grid):
+        params = copy.deepcopy(base_params)
+        params.update(combo)
+
+        if params["model_name"] != "ElasticNet":
+            params["l1_ratio"] = 0.5
+
+        candidates.append(params)
+
+    return candidates
+
+
 def run_oos_forecast(X, Y, dates, cfg):
     oos_start_ts = pd.Timestamp(cfg["oos_start"])
     start_candidates = np.where(dates >= oos_start_ts)[0]
@@ -172,13 +191,7 @@ def run_oos_forecast(X, Y, dates, cfg):
 
     candidates = None
     if RUN_MODE == "sweep":
-        candidates = []
-        for combo in ParameterGrid(SWEEP_GRID):
-            params = copy.deepcopy(cfg["params"])
-            params.update(combo)
-            if params["model_name"] != "ElasticNet":
-                params["l1_ratio"] = 0.5
-            candidates.append(params)
+        candidates = _build_inner_candidates(cfg["params"], cfg["candidate_grid"])
 
     for test_idx in range(start_idx, T):
         train_end = test_idx - cfg["horizon"]
@@ -191,6 +204,12 @@ def run_oos_forecast(X, Y, dates, cfg):
 
         if RUN_MODE == "single":
             best_params = cfg["params"]
+            val_loss[test_idx] = _validation_mse(
+                X_train,
+                Y_train,
+                params=best_params,
+                validation_split=cfg["params"].get("validation_split", 0.15),
+            )
         else:
             losses = [
                 _validation_mse(
@@ -210,12 +229,15 @@ def run_oos_forecast(X, Y, dates, cfg):
         done += 1
         if (done % 10 == 0) or (done == total_oos):
             pct = 100.0 * done / total_oos
+            r2_now = np.array([r2_oos(Y[:, k], Y_forecast[:, k]) for k in range(M)])
+
             msg = (
                 f"[{model_name}] "
                 f"{done:4d}/{total_oos} "
                 f"({pct:5.1f}%)  "
                 f"date={dates[test_idx].strftime('%Y-%m-%d')}"
             )
+
             if RUN_MODE == "sweep":
                 msg += (
                     f"  best={best_params['model_name']}"
@@ -224,24 +246,24 @@ def run_oos_forecast(X, Y, dates, cfg):
                 if best_params["model_name"] == "ElasticNet":
                     msg += f"  l1r={best_params['l1_ratio']:g}"
                 msg += f"  val={val_loss[test_idx]:.6f}"
+            else:
+                msg += f"  val={val_loss[test_idx]:.6f}"
+
             print(msg)
+            print("  R2OOS:", np.round(r2_now, 4))
 
     model_key = cfg["params"]["model_name"] if RUN_MODE == "single" else "GLM"
 
     out = {
         "Y_zero_benchmark": np.zeros_like(Y),
-        f"Y_forecast_agg_{model_key}": Y_forecast,
-        f"MSE_{model_key}": np.nanmean((Y - Y_forecast) ** 2, axis=0),
-        f"R2OOS_{model_key}": np.array(
-            [r2_oos(Y[:, k], Y_forecast[:, k]) for k in range(M)]
-        ),
-        f"R2OOS_pval_{model_key}": np.array(
+        "ValLoss_" + model_key: val_loss,
+        "Y_forecast_agg_" + model_key: Y_forecast,
+        "MSE_" + model_key: np.nanmean((Y - Y_forecast) ** 2, axis=0),
+        "R2OOS_" + model_key: np.array([r2_oos(Y[:, k], Y_forecast[:, k]) for k in range(M)]),
+        "R2OOS_pval_" + model_key: np.array(
             [r2_oos_pvalue(Y[:, k], Y_forecast[:, k], hac_lags=cfg["horizon"]) for k in range(M)]
         ),
     }
-
-    if RUN_MODE == "sweep":
-        out["ValLoss_GLM"] = val_loss
 
     return out
 
@@ -264,12 +286,15 @@ def run_experiment(custom_config=None):
     print(f"Feature groups: {cfg['feature_groups']}")
     print(f"Params: {json.dumps(cfg['params'])}")
 
+    if RUN_MODE == "sweep":
+        print(f"Candidate grid: {json.dumps(cfg['candidate_grid'])}")
+
     model_name = cfg["params"]["model_name"] if RUN_MODE == "single" else "GLM"
 
     save_dict = {
         "Note": (
             "Expanding-window OOS penalized linear model with horizon-consistent embargo. "
-            "Sweep mode uses purged validation for hyperparameter choice."
+            "Sweep mode uses outer sweep over candidate sets and inner purged validation within each OOS origin."
         ),
         "MatPath": cfg["mat_path"],
         "FeatureGroupsJSON": json.dumps(cfg["feature_groups"]),
@@ -292,7 +317,7 @@ def run_experiment(custom_config=None):
     }
 
     if RUN_MODE == "sweep":
-        save_dict["SweepGridJSON"] = json.dumps(SWEEP_GRID)
+        save_dict["CandidateGridJSON"] = json.dumps(cfg["candidate_grid"])
 
     save_dict.update(run_oos_forecast(X, Y, dates, cfg))
 
@@ -301,7 +326,7 @@ def run_experiment(custom_config=None):
     sio.savemat(out_mat, save_dict)
 
     print("Saved:", out_mat)
-    print("R2OOS:", save_dict[f"R2OOS_{model_name}"])
+    print("R2OOS:", save_dict["R2OOS_" + model_name])
 
     return save_dict, out_mat, X_df.columns.tolist(), Y_df.columns.tolist()
 
@@ -311,11 +336,11 @@ def build_sweep_configs(base_config, sweep_grid):
 
     for combo in ParameterGrid(sweep_grid):
         cfg = copy.deepcopy(base_config)
-        cfg["params"].update(combo)
-
-        if cfg["params"]["model_name"] != "ElasticNet":
-            cfg["params"]["l1_ratio"] = 0.5
-
+        cfg["candidate_grid"] = {
+            "model_name": combo["model_name"],
+            "alpha": combo["alpha"],
+            "l1_ratio": combo["l1_ratio"],
+        }
         cfg_list.append(cfg)
 
     return cfg_list
@@ -340,13 +365,15 @@ def run_hyperparameter_sweep(base_config=None, sweep_grid=None):
     for run_no, cfg in enumerate(cfg_list, start=1):
         print("=" * 100)
         print(f"Run {run_no}/{total_runs}")
-        print("params:", json.dumps(cfg["params"], ensure_ascii=False))
+        print("candidate_grid:", json.dumps(cfg["candidate_grid"], ensure_ascii=False))
 
         save_dict, mat_file, _, y_columns = run_experiment(cfg)
 
-        model_name = cfg["params"]["model_name"] if RUN_MODE == "single" else "GLM"
         cfg_for_summary = copy.deepcopy(cfg)
-        cfg_for_summary["model_name"] = model_name
+        cfg_for_summary["model_name"] = "GLM"
+        cfg_for_summary["hyper_freq"] = np.nan
+        cfg_for_summary["nmc"] = np.nan
+        cfg_for_summary["navg"] = np.nan
 
         summary_rows, r2_rows, pval_rows, mse_rows = extract_summary_rows(
             save_dict=save_dict,
@@ -364,9 +391,9 @@ def run_hyperparameter_sweep(base_config=None, sweep_grid=None):
 
     save_sweep_summary_to_excel(
         summary_rows=all_summary_rows,
-        r2_rows=all_r2_rows,
-        pval_rows=all_pval_rows,
-        mse_rows=all_mse_rows,
+        r2_rows=r2_rows,
+        pval_rows=pval_rows,
+        mse_rows=mse_rows,
         out_xlsx=out_xlsx,
     )
 

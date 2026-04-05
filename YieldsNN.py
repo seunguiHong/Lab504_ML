@@ -33,13 +33,13 @@ RUN_MODE = "sweep"
 
 BASE_CONFIG = {
     "mat_path": "data/target_and_features.mat",
-    "feature_groups": ["dy_pc1", "dy_pc2", "dy_pc3"],
+    "feature_groups": ["dy_pc1", "dy_pc2"],
     "target_group": "dy",
     "horizon": 12,
     "oos_start": "1989-01-31",
     "hyper_freq": 60,
-    "nmc": 10,
-    "navg": 2,
+    "nmc": 1,
+    "navg": 1,
     "run_tag": "pc123",
     "model_func": NFB.NNModel,
     "model_name": "NNModel",
@@ -62,10 +62,10 @@ BASE_CONFIG = {
 }
 
 SWEEP_GRID = {
-    "archi": [[3, 3], [3]],
-    "Dropout": [[0.0], [0.1, 0.3]],
-    "l1l2": [[1e-4, 1e-5], [1e-2, 1e-1]],
-    "learning_rate": [0.03, 0.01],
+    "archi": [[3,3]],
+    "Dropout": [[0.0]],
+    "l1l2": [[1e-4, 1e-3]],
+    "learning_rate": [0.03],
 }
 
 
