@@ -50,20 +50,20 @@ BASE_CONFIG = {
         "yield": {
             "feature_groups": ["dy_pc1", "dy_pc2"],
             "archi": [3, 3],
-            "dropout": 0.0,
-            "l1l2": [1e-4, 5e-5],
+            "dropout": [0.0],
+            "l1l2": [[1e-4, 5e-5]],
         },
         "macro": {
             "feature_groups": ["macro"],
             "archi": [32, 16],
-            "dropout": 0.1,
-            "l1l2": [1e-4, 5e-5],
+            "dropout": [0.1],
+            "l1l2": [[1e-4, 5e-5]],
         },
     },
     "params": {
         "head_archi": [16],
-        "head_dropout": 0.0,
-        "head_l1l2": [1e-4, 5e-5],
+        "head_dropout": [0.0],
+        "head_l1l2": [[1e-4, 5e-5]],
         "learning_rate": 0.03,
         "decay_rate": 0.001,
         "momentum": 0.9,
@@ -80,16 +80,74 @@ BASE_CONFIG = {
 
 SWEEP_GRID = {
     "yield_archi": [[3, 3], [3]],
-    "yield_dropout": [0.0, 0.1],
-    "yield_l1l2": [[1e-4, 5e-5], [1e-3, 1e-4]],
     "macro_archi": [[32, 16], [16, 8]],
-    "macro_dropout": [0.0, 0.1],
-    "macro_l1l2": [[1e-4, 5e-5], [1e-3, 1e-4]],
     "head_archi": [[16], [8]],
-    "head_dropout": [0.0, 0.1],
-    "head_l1l2": [[1e-4, 5e-5], [1e-3, 1e-4]],
     "learning_rate": [0.03, 0.01],
+
+    "yield_dropout": [[0.0], [0.1, 0.3]],
+    "yield_l1l2": [[[1e-4, 5e-5]], [[1e-4, 5e-5], [1e-3, 1e-4]]],
+
+    "macro_dropout": [[0.0], [0.1, 0.3]],
+    "macro_l1l2": [[[1e-4, 5e-5]], [[1e-4, 5e-5], [1e-3, 1e-4]]],
+
+    "head_dropout": [[0.0], [0.1, 0.3]],
+    "head_l1l2": [[[1e-4, 5e-5]], [[1e-4, 5e-5], [1e-3, 1e-4]]],
 }
+
+
+def _arch_tag(x):
+    return "x".join(str(int(v)) for v in np.asarray(x).ravel())
+
+
+def _pair_tag(x):
+    arr = np.asarray(x, dtype=float).ravel()
+    if arr.size == 0:
+        return "0-0"
+    if arr.size == 1:
+        return f"{arr[0]:g}-{arr[0]:g}"
+    return f"{arr[0]:g}-{arr[1]:g}"
+
+
+def _list_tag(x):
+    return "|".join(f"{float(v):g}" for v in np.asarray(x, dtype=float).ravel())
+
+
+def _reg_tag(x):
+    arr = np.asarray(x, dtype=float)
+    if arr.ndim == 1:
+        return _pair_tag(arr)
+    return "|".join(_pair_tag(row) for row in arr)
+
+
+def macro_result_name(cfg, sweep=False):
+    target = str(cfg["target_group"])
+    run_tag = str(cfg["run_tag"])
+    horizon = f"h{int(cfg['horizon'])}"
+
+    if sweep:
+        return "__".join(["sweep", target, run_tag, "MacroDual", horizon])
+
+    yspec = cfg["branch_config"]["yield"]
+    mspec = cfg["branch_config"]["macro"]
+    hspec = cfg["params"]
+
+    parts = [
+        target,
+        run_tag,
+        "MacroDual",
+        horizon,
+        f"ya{_arch_tag(yspec['archi'])}",
+        f"ma{_arch_tag(mspec['archi'])}",
+        f"ha{_arch_tag(hspec['head_archi'])}",
+        f"yd{_list_tag(yspec['dropout'])}",
+        f"md{_list_tag(mspec['dropout'])}",
+        f"hd{_list_tag(hspec['head_dropout'])}",
+        f"ylr{_reg_tag(yspec['l1l2'])}",
+        f"mlr{_reg_tag(mspec['l1l2'])}",
+        f"hlr{_reg_tag(hspec['head_l1l2'])}",
+        f"lr{float(hspec['learning_rate']):g}",
+    ]
+    return "__".join(parts)
 
 
 def load_group_df(Xmat, group_name):
@@ -160,8 +218,8 @@ def load_dual_dataset(mat_path, branch_config, target_group):
                 "col_end": int(col_end),
                 "input_dim": int(branch_df.shape[1]),
                 "archi": list(spec["archi"]),
-                "dropout": float(spec["dropout"]),
-                "l1l2": list(spec["l1l2"]),
+                "dropout": float(np.asarray(spec["dropout"], dtype=float).ravel()[0]),
+                "l1l2": list(np.asarray(spec["l1l2"], dtype=float).reshape(-1)[:2]),
             }
         )
         col_start = col_end
@@ -172,30 +230,109 @@ def load_dual_dataset(mat_path, branch_config, target_group):
     return X_df, Y_df, branch_specs
 
 
-def macro_result_name(cfg, sweep=False):
-    if sweep:
-        return f"sweep__{cfg['target_group']}__{cfg['run_tag']}__MacroDual__h{cfg['horizon']}"
+def _build_inner_candidates(cfg):
+    y_do = np.asarray(cfg["branch_config"]["yield"]["dropout"], dtype=float).ravel().tolist()
+    m_do = np.asarray(cfg["branch_config"]["macro"]["dropout"], dtype=float).ravel().tolist()
+    h_do = np.asarray(cfg["params"]["head_dropout"], dtype=float).ravel().tolist()
 
-    yspec = cfg["branch_config"]["yield"]
-    mspec = cfg["branch_config"]["macro"]
-    hspec = cfg["params"]
+    y_reg = np.asarray(cfg["branch_config"]["yield"]["l1l2"], dtype=float)
+    m_reg = np.asarray(cfg["branch_config"]["macro"]["l1l2"], dtype=float)
+    h_reg = np.asarray(cfg["params"]["head_l1l2"], dtype=float)
 
-    y_arch = "x".join(map(str, yspec["archi"]))
-    m_arch = "x".join(map(str, mspec["archi"]))
-    h_arch = "x".join(map(str, hspec["head_archi"]))
+    if y_reg.ndim == 1:
+        y_reg = [y_reg.tolist()]
+    else:
+        y_reg = [row.tolist() for row in y_reg]
 
-    return (
-        f"{cfg['target_group']}__{cfg['run_tag']}__MacroDual__h{cfg['horizon']}"
-        f"__ya{y_arch}__ma{m_arch}__ha{h_arch}"
-        f"__ylr{yspec['l1l2'][0]:g}-{yspec['l1l2'][1]:g}"
-        f"__mlr{mspec['l1l2'][0]:g}-{mspec['l1l2'][1]:g}"
-        f"__hlr{hspec['head_l1l2'][0]:g}-{hspec['head_l1l2'][1]:g}"
-        f"__lr{hspec['learning_rate']:g}"
-    )
+    if m_reg.ndim == 1:
+        m_reg = [m_reg.tolist()]
+    else:
+        m_reg = [row.tolist() for row in m_reg]
+
+    if h_reg.ndim == 1:
+        h_reg = [h_reg.tolist()]
+    else:
+        h_reg = [row.tolist() for row in h_reg]
+
+    inner_grid = {
+        "yield_dropout": y_do,
+        "yield_l1l2": y_reg,
+        "macro_dropout": m_do,
+        "macro_l1l2": m_reg,
+        "head_dropout": h_do,
+        "head_l1l2": h_reg,
+    }
+
+    candidates = []
+    for combo in ParameterGrid(inner_grid):
+        cand = copy.deepcopy(cfg)
+
+        cand["branch_config"]["yield"]["dropout"] = float(combo["yield_dropout"])
+        cand["branch_config"]["yield"]["l1l2"] = list(combo["yield_l1l2"])
+
+        cand["branch_config"]["macro"]["dropout"] = float(combo["macro_dropout"])
+        cand["branch_config"]["macro"]["l1l2"] = list(combo["macro_l1l2"])
+
+        cand["params"]["head_dropout"] = float(combo["head_dropout"])
+        cand["params"]["head_l1l2"] = list(combo["head_l1l2"])
+
+        candidates.append(cand)
+
+    return candidates
 
 
-def run_oos_forecast(X, Y, dates, cfg, dumploc, ncpus, model_params):
-    model_func = cfg["model_func"]
+def _apply_candidate_to_branch_specs(base_branch_specs, cand_cfg):
+    out = copy.deepcopy(base_branch_specs)
+    spec_map = {spec["name"]: spec for spec in out}
+
+    spec_map["yield"]["archi"] = list(cand_cfg["branch_config"]["yield"]["archi"])
+    spec_map["yield"]["dropout"] = float(cand_cfg["branch_config"]["yield"]["dropout"])
+    spec_map["yield"]["l1l2"] = list(cand_cfg["branch_config"]["yield"]["l1l2"])
+
+    spec_map["macro"]["archi"] = list(cand_cfg["branch_config"]["macro"]["archi"])
+    spec_map["macro"]["dropout"] = float(cand_cfg["branch_config"]["macro"]["dropout"])
+    spec_map["macro"]["l1l2"] = list(cand_cfg["branch_config"]["macro"]["l1l2"])
+
+    return out
+
+
+def _select_best_candidate(X_model, Y_model, cfg, base_branch_specs, dumploc, ncpus, refit):
+    candidates = _build_inner_candidates(cfg)
+
+    best_outputs = None
+    best_cfg = None
+    best_score = np.inf
+
+    for cand_cfg in candidates:
+        model_params = dict(cand_cfg["params"])
+        model_params["head_archi"] = list(cand_cfg["params"]["head_archi"])
+        model_params["head_dropout"] = float(cand_cfg["params"]["head_dropout"])
+        model_params["head_l1l2"] = list(cand_cfg["params"]["head_l1l2"])
+        model_params["branch_specs"] = _apply_candidate_to_branch_specs(base_branch_specs, cand_cfg)
+
+        outputs = run_parallel_seeds(
+            cand_cfg["model_func"],
+            ncpus,
+            int(cand_cfg["nmc"]),
+            X_model,
+            Y_model,
+            params=model_params,
+            refit=refit,
+            dumploc=dumploc,
+        )
+
+        this_val = np.array([outputs[k][1] for k in range(int(cand_cfg["nmc"]))], dtype=float)
+        score = float(np.nanmin(this_val))
+
+        if score < best_score:
+            best_score = score
+            best_outputs = outputs
+            best_cfg = cand_cfg
+
+    return best_outputs, best_cfg
+
+
+def run_oos_forecast(X, Y, dates, cfg, base_branch_specs, dumploc, ncpus):
     model_name = cfg["model_name"]
 
     oos_start_ts = pd.Timestamp(cfg["oos_start"])
@@ -238,15 +375,14 @@ def run_oos_forecast(X, Y, dates, cfg, dumploc, ncpus, model_params):
         else:
             refit = False
 
-        outputs = run_parallel_seeds(
-            model_func,
-            ncpus,
-            nmc,
-            X_model,
-            Y_model,
-            params=model_params,
-            refit=refit,
+        outputs, best_cfg = _select_best_candidate(
+            X_model=X_model,
+            Y_model=Y_model,
+            cfg=cfg,
+            base_branch_specs=base_branch_specs,
             dumploc=dumploc,
+            ncpus=ncpus,
+            refit=refit,
         )
 
         val_loss[i, :] = np.array([outputs[k][1] for k in range(nmc)], dtype=float)
@@ -275,7 +411,16 @@ def run_oos_forecast(X, Y, dates, cfg, dumploc, ncpus, model_params):
                 f"refit={refit} | "
                 f"val={current_best_val:10.6f} | "
                 f"iter={iter_elapsed:7.2f}s | "
-                f"elapsed={total_elapsed:8.1f}s"
+                f"elapsed={total_elapsed:8.1f}s | "
+                f"ya={best_cfg['branch_config']['yield']['archi']} | "
+                f"ma={best_cfg['branch_config']['macro']['archi']} | "
+                f"ha={best_cfg['params']['head_archi']} | "
+                f"yd={best_cfg['branch_config']['yield']['dropout']} | "
+                f"md={best_cfg['branch_config']['macro']['dropout']} | "
+                f"hd={best_cfg['params']['head_dropout']} | "
+                f"ylr={best_cfg['branch_config']['yield']['l1l2']} | "
+                f"mlr={best_cfg['branch_config']['macro']['l1l2']} | "
+                f"hlr={best_cfg['params']['head_l1l2']}"
             )
             print("  R2OOS:", np.round(r2_now, 4))
 
@@ -309,6 +454,9 @@ def run_experiment(custom_config=None):
 
     model_params = dict(cfg["params"])
     model_params["branch_specs"] = branch_specs
+    model_params["head_archi"] = list(cfg["params"]["head_archi"])
+    model_params["head_dropout"] = cfg["params"]["head_dropout"]
+    model_params["head_l1l2"] = cfg["params"]["head_l1l2"]
 
     save_dict = build_save_dict(cfg, X_df, Y_df, Y)
     save_dict["BranchConfigJSON"] = json.dumps(cfg["branch_config"])
@@ -331,9 +479,9 @@ def run_experiment(custom_config=None):
             Y=Y,
             dates=dates,
             cfg=cfg,
+            base_branch_specs=branch_specs,
             dumploc=dumploc,
             ncpus=ncpus,
-            model_params=model_params,
         )
     )
 
@@ -355,18 +503,19 @@ def build_sweep_configs(base_config, sweep_grid):
     for combo in ParameterGrid(sweep_grid):
         cfg = copy.deepcopy(base_config)
 
-        cfg["branch_config"]["yield"]["archi"] = combo["yield_archi"]
-        cfg["branch_config"]["yield"]["dropout"] = combo["yield_dropout"]
-        cfg["branch_config"]["yield"]["l1l2"] = combo["yield_l1l2"]
+        cfg["branch_config"]["yield"]["archi"] = list(combo["yield_archi"])
+        cfg["branch_config"]["macro"]["archi"] = list(combo["macro_archi"])
+        cfg["params"]["head_archi"] = list(combo["head_archi"])
+        cfg["params"]["learning_rate"] = float(combo["learning_rate"])
 
-        cfg["branch_config"]["macro"]["archi"] = combo["macro_archi"]
-        cfg["branch_config"]["macro"]["dropout"] = combo["macro_dropout"]
-        cfg["branch_config"]["macro"]["l1l2"] = combo["macro_l1l2"]
+        cfg["branch_config"]["yield"]["dropout"] = list(np.asarray(combo["yield_dropout"], dtype=float).ravel())
+        cfg["branch_config"]["yield"]["l1l2"] = [list(v) for v in np.asarray(combo["yield_l1l2"], dtype=float).reshape(-1, 2)]
 
-        cfg["params"]["head_archi"] = combo["head_archi"]
-        cfg["params"]["head_dropout"] = combo["head_dropout"]
-        cfg["params"]["head_l1l2"] = combo["head_l1l2"]
-        cfg["params"]["learning_rate"] = combo["learning_rate"]
+        cfg["branch_config"]["macro"]["dropout"] = list(np.asarray(combo["macro_dropout"], dtype=float).ravel())
+        cfg["branch_config"]["macro"]["l1l2"] = [list(v) for v in np.asarray(combo["macro_l1l2"], dtype=float).reshape(-1, 2)]
+
+        cfg["params"]["head_dropout"] = list(np.asarray(combo["head_dropout"], dtype=float).ravel())
+        cfg["params"]["head_l1l2"] = [list(v) for v in np.asarray(combo["head_l1l2"], dtype=float).reshape(-1, 2)]
 
         cfg_list.append(cfg)
 

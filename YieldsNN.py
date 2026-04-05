@@ -21,7 +21,6 @@ from Utils import (
     run_parallel_seeds,
     summarize_oos_metrics,
     build_save_dict,
-    result_name,
     extract_summary_rows,
     save_sweep_summary_to_excel,
 )
@@ -46,7 +45,7 @@ BASE_CONFIG = {
     "model_name": "NNModel",
     "params": {
         "archi": [3, 3],
-        "Dropout": 0.0,
+        "Dropout": [0.0],
         "l1l2": [1e-4, 1e-5],
         "learning_rate": 0.03,
         "decay_rate": 0.001,
@@ -64,14 +63,126 @@ BASE_CONFIG = {
 
 SWEEP_GRID = {
     "archi": [[3, 3], [3]],
-    "Dropout": [0.0, 0.1],
-    "l1l2": [[1e-4, 1e-5], [1e-3, 1e-4]],
+    "Dropout": [[0.0], [0.1, 0.3]],
+    "l1l2": [[1e-4, 1e-5], [1e-2, 1e-1]],
     "learning_rate": [0.03, 0.01],
 }
 
 
+def _pair_tag(x):
+    arr = np.asarray(x, dtype=float).ravel()
+    if arr.size == 0:
+        return "0-0"
+    if arr.size == 1:
+        return f"{arr[0]:g}-{arr[0]:g}"
+    return f"{arr[0]:g}-{arr[1]:g}"
+
+
+def _safe_result_name(cfg, sweep=False):
+    target = str(cfg["target_group"])
+    feat = str(cfg["run_tag"])
+    model = str(cfg["model_name"]).replace("Model", "")
+    horizon = f"h{int(cfg['horizon'])}"
+
+    if sweep:
+        return "__".join(["sweep", target, feat, model, horizon])
+
+    p = cfg["params"]
+
+    arch = p.get("archi", [])
+    arch_arr = np.asarray(arch).ravel()
+    arch_tag = "x".join(str(int(v)) for v in arch_arr)
+
+    do = p.get("Dropout", [0.0])
+    do_arr = np.asarray(do, dtype=float).ravel()
+    do_tag = "|".join(f"{float(v):g}" for v in do_arr)
+
+    reg = p.get("l1l2", [0.0, 0.0])
+    reg_arr = np.asarray(reg, dtype=float)
+    if reg_arr.ndim == 1:
+        reg_tag = _pair_tag(reg_arr)
+    else:
+        reg_tag = "|".join(_pair_tag(row) for row in reg_arr)
+
+    lr = p.get("learning_rate", 0.0)
+    lr_arr = np.asarray(lr, dtype=float).ravel()
+    lr_tag = "|".join(f"{float(v):g}" for v in lr_arr)
+
+    return "__".join(
+        [
+            target,
+            feat,
+            model,
+            horizon,
+            f"a{arch_tag}",
+            f"do{do_tag}",
+            f"reg{reg_tag}",
+            f"lr{lr_tag}",
+        ]
+    )
+
+
+def _build_inner_candidates(params):
+    dropout_vals = params["Dropout"]
+    l1l2_vals = params["l1l2"]
+
+    if np.isscalar(dropout_vals):
+        dropout_vals = [float(dropout_vals)]
+    else:
+        dropout_vals = [float(v) for v in np.asarray(dropout_vals, dtype=float).ravel()]
+
+    l1l2_arr = np.asarray(l1l2_vals, dtype=float)
+    if l1l2_arr.ndim == 1:
+        l1l2_candidates = [l1l2_arr.tolist()]
+    else:
+        l1l2_candidates = [row.tolist() for row in l1l2_arr]
+
+    inner_grid = {
+        "Dropout": dropout_vals,
+        "l1l2": l1l2_candidates,
+    }
+
+    candidates = []
+    for combo in ParameterGrid(inner_grid):
+        cand = copy.deepcopy(params)
+        cand["Dropout"] = float(combo["Dropout"])
+        cand["l1l2"] = list(combo["l1l2"])
+        candidates.append(cand)
+
+    return candidates
+
+
+def _select_best_candidate(X_model, Y_model, cfg, dumploc, ncpus, refit):
+    candidates = _build_inner_candidates(cfg["params"])
+
+    best_outputs = None
+    best_params = None
+    best_score = np.inf
+
+    for cand_params in candidates:
+        outputs = run_parallel_seeds(
+            cfg["model_func"],
+            ncpus,
+            int(cfg["nmc"]),
+            X_model,
+            Y_model,
+            params=cand_params,
+            refit=refit,
+            dumploc=dumploc,
+        )
+
+        this_val = np.array([outputs[k][1] for k in range(int(cfg["nmc"]))], dtype=float)
+        score = float(np.nanmin(this_val))
+
+        if score < best_score:
+            best_score = score
+            best_outputs = outputs
+            best_params = cand_params
+
+    return best_outputs, best_params
+
+
 def run_oos_forecast(X, Y, dates, cfg, dumploc, ncpus):
-    model_func = cfg["model_func"]
     model_name = cfg["model_name"]
 
     oos_start_ts = pd.Timestamp(cfg["oos_start"])
@@ -111,15 +222,13 @@ def run_oos_forecast(X, Y, dates, cfg, dumploc, ncpus):
         else:
             refit = False
 
-        outputs = run_parallel_seeds(
-            model_func,
-            ncpus,
-            nmc,
-            X_model,
-            Y_model,
-            params=cfg["params"],
-            refit=refit,
+        outputs, best_params = _select_best_candidate(
+            X_model=X_model,
+            Y_model=Y_model,
+            cfg=cfg,
             dumploc=dumploc,
+            ncpus=ncpus,
+            refit=refit,
         )
 
         val_loss[i, :] = np.array([outputs[k][1] for k in range(nmc)], dtype=float)
@@ -143,7 +252,11 @@ def run_oos_forecast(X, Y, dates, cfg, dumploc, ncpus):
                 f"[{j:4d}/{total_oos}] "
                 f"date={dates[i].strftime('%Y-%m-%d')} | "
                 f"refit={refit} | "
-                f"val={current_best_val:10.6f}"
+                f"val={current_best_val:10.6f} | "
+                f"arch={best_params['archi']} | "
+                f"do={best_params['Dropout']} | "
+                f"l1l2={best_params['l1l2']} | "
+                f"lr={best_params['learning_rate']}"
             )
             print("  R2OOS:", np.round(r2_now, 4))
 
@@ -179,7 +292,7 @@ def run_experiment(custom_config=None):
     save_dict.update(run_oos_forecast(X, Y, dates, cfg, dumploc, ncpus))
 
     os.makedirs("results", exist_ok=True)
-    out_mat = os.path.join("results", result_name(cfg) + ".mat")
+    out_mat = os.path.join("results", _safe_result_name(cfg) + ".mat")
     sio.savemat(out_mat, save_dict)
 
     print("Saved to", out_mat)
@@ -193,7 +306,10 @@ def build_sweep_configs(base_config, sweep_grid):
 
     for combo in ParameterGrid(sweep_grid):
         cfg = copy.deepcopy(base_config)
-        cfg["params"].update(combo)
+        cfg["params"]["archi"] = list(combo["archi"])
+        cfg["params"]["Dropout"] = list(combo["Dropout"])
+        cfg["params"]["l1l2"] = list(combo["l1l2"])
+        cfg["params"]["learning_rate"] = float(combo["learning_rate"])
         cfg_list.append(cfg)
 
     return cfg_list
@@ -234,7 +350,7 @@ def run_hyperparameter_sweep(base_config=None, sweep_grid=None):
         all_pval_rows.extend(pval_rows)
         all_mse_rows.extend(mse_rows)
 
-    out_xlsx = os.path.join("results", result_name(base_cfg, sweep=True) + ".xlsx")
+    out_xlsx = os.path.join("results", _safe_result_name(base_cfg, sweep=True) + ".xlsx")
     save_sweep_summary_to_excel(
         summary_rows=all_summary_rows,
         r2_rows=all_r2_rows,
