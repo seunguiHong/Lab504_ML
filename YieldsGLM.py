@@ -26,14 +26,14 @@ PURGE_SIZE = 12
 
 CONFIG = {
     "mat_path": "data/target_and_features.mat",
-    "feature_groups": ["dy_pc1", "dy_pc2", "dy_pc3"],
+    "feature_groups": ["dy_pc","macro"],
     "target_group": "dy",
     "horizon": 12,
     "oos_start": "1989-01-31",
-    "run_tag": "pc123",
+    "run_tag": "pc123+macro",
     "params": {
         "model_name": "Ridge",                 # "Ridge" or "Lasso"
-        "alpha_grid": [1e-4, 1e-2, 1.0, 1e2],
+        "alpha_grid": [1e-2,1,1e2],
         "standardize": True,
         "max_iter": 10000,
         "validation_split": 0.15,

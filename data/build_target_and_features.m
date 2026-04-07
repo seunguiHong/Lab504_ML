@@ -39,6 +39,11 @@ function build_target_and_features(in_csv, out_mat)
     FWD   = y_annual(:, 2:end) .* n_vec - y_annual(:, 1:end-1) .* (n_vec - 1);
     rf12  = y_annual(:, 1);
 
+    FWD_chg = NaN(size(FWD));
+    if size(FWD, 1) > 12
+        FWD_chg(13:end, :) = FWD(13:end, :) - FWD(1:end-12, :);
+    end
+
     T = size(y_120, 1);
     DY_120 = NaN(T, 120);
     if T > 12
@@ -124,6 +129,10 @@ function build_target_and_features(in_csv, out_mat)
     X.fwd.Time  = Time;
     X.fwd.data  = [rf12, FWD];
     X.fwd.names = cellstr(["fwd_1", compose('fwd_%d', 2:10)]);
+
+    X.fwdchg.Time  = Time;
+    X.fwdchg.data  = FWD_chg;
+    X.fwdchg.names = cellstr(compose('dfwd_%d', 2:10));
 
     X.dy_pc.Time  = Time;
     X.dy_pc.data  = DY_PC;
