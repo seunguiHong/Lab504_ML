@@ -55,7 +55,7 @@ BASE_CONFIG = {
         "patience": 20,
         "batch_size": 32,
         "validation_split": 0.15,
-        "shuffle": True,
+        "shuffle": False,
         "loss_name": "mse",
         "huber_delta": 1.0,
     },
