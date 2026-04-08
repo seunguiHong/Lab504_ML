@@ -4,8 +4,6 @@
 import os
 import copy
 import json
-import shutil
-import tempfile
 
 import numpy as np
 import pandas as pd
@@ -13,8 +11,15 @@ import scipy.io as sio
 
 from sklearn.model_selection import ParameterGrid
 
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers, regularizers
+
 from Utils import (
-    get_cpu_count,
     load_dataset,
     summarize_oos_metrics,
     build_save_dict,
@@ -22,40 +27,32 @@ from Utils import (
     save_sweep_summary_to_excel,
 )
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
-
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import regularizers
-from tensorflow.keras import layers
-
-
-RUN_MODE = "sweep"
+RUN_MODE = "sweep"   # "single" or "sweep"
 
 
 BASE_CONFIG = {
     "mat_path": "data/target_and_features.mat",
-    "feature_groups": ["dy_pc1", "dy_pc2"],
+    "feature_groups": ["dy_pc","macropc"],
     "target_group": "dy",
     "horizon": 12,
     "oos_start": "1989-01-31",
-    "hyper_freq": 60,
+    "hyper_freq": 60,          # retune inner hyperparameters every 60 OOS steps
     "nmc": 1,
     "navg": 1,
-    "run_tag": "pc12_lstm",
+    "run_tag": "pc_lstm",
     "model_name": "LSTMModel",
     "params": {
         "seq_len": 12,
         "lstm_units": [8],
         "dense_archi": [],
-        "Dropout": [0.0],
-        "l1l2": [1e-4, 1e-5],
-        "learning_rate": 0.01,
-        "decay_rate": 0.001,
+        "Dropout": [0.0],              # inner candidates
+        "l1l2": [1e-4, 1e-5],          # inner candidates or one pair
+        "learning_rate": 0.005,
         "momentum": 0.9,
         "nesterov": True,
+        "clipnorm": 1.0,
+        "standardize_x": True,
+        "recurrent_dropout": 0.0,
         "epochs": 500,
         "patience": 20,
         "batch_size": 32,
@@ -66,12 +63,11 @@ BASE_CONFIG = {
     },
 }
 
+
 SWEEP_GRID = {
     "seq_len": [12],
     "lstm_units": [[8], [16]],
     "dense_archi": [[], [8]],
-    "Dropout": [[0.0], [0.1, 0.3]],
-    "l1l2": [[1e-4, 1e-5], [0.0], [1e-2, 1e-3]],
     "learning_rate": [0.01, 0.003],
 }
 
@@ -103,9 +99,9 @@ def _safe_result_name(cfg, sweep=False):
 
     p = cfg["params"]
 
-    seq_tag = f"seq{int(p.get('seq_len', 12))}"
-    lstm_tag = f"lstm{_arch_tag(p.get('lstm_units', []))}"
-    dense_tag = f"dense{_arch_tag(p.get('dense_archi', []))}"
+    seq_tag = f"seq{int(p['seq_len'])}"
+    lstm_tag = f"lstm{_arch_tag(p['lstm_units'])}"
+    dense_tag = f"dense{_arch_tag(p['dense_archi'])}"
 
     do = p.get("Dropout", [0.0])
     do_arr = np.asarray(do, dtype=float).ravel()
@@ -118,9 +114,7 @@ def _safe_result_name(cfg, sweep=False):
     else:
         reg_tag = "|".join(_pair_tag(row) for row in reg_arr)
 
-    lr = p.get("learning_rate", 0.0)
-    lr_arr = np.asarray(lr, dtype=float).ravel()
-    lr_tag = "|".join(f"{float(v):g}" for v in lr_arr)
+    lr_tag = f"{float(p['learning_rate']):g}"
 
     return "__".join(
         [
@@ -138,15 +132,6 @@ def _safe_result_name(cfg, sweep=False):
     )
 
 
-def make_dump_dir():
-    return tempfile.mkdtemp(prefix="trainingDumps_")
-
-
-def safe_rmtree(path):
-    if path and os.path.exists(path):
-        shutil.rmtree(path, ignore_errors=True)
-
-
 def _set_all_seeds(seed):
     np.random.seed(seed)
     tf.random.set_seed(seed)
@@ -154,54 +139,43 @@ def _set_all_seeds(seed):
 
 
 def _make_optimizer(params):
-    lr = float(params["learning_rate"])
-    decay_rate = float(params.get("decay_rate", 0.0))
-    momentum = float(params.get("momentum", 0.0))
-    nesterov = bool(params.get("nesterov", False))
-
-    schedule = keras.optimizers.schedules.ExponentialDecay(
-        initial_learning_rate=lr,
-        decay_steps=100,
-        decay_rate=max(1e-12, 1.0 - decay_rate),
-        staircase=False,
-    )
-
     return keras.optimizers.SGD(
-        learning_rate=schedule,
-        momentum=momentum,
-        nesterov=nesterov,
+        learning_rate=float(params["learning_rate"]),
+        momentum=float(params.get("momentum", 0.0)),
+        nesterov=bool(params.get("nesterov", False)),
+        clipnorm=float(params.get("clipnorm", 1.0)),
     )
 
 
 def _make_loss(params):
     loss_name = str(params.get("loss_name", "mse")).lower()
+
     if loss_name == "mse":
         return "mse"
     if loss_name == "huber":
         return keras.losses.Huber(delta=float(params.get("huber_delta", 1.0)))
+
     raise ValueError(f"Unknown loss_name: {loss_name}")
 
 
 def _build_lstm_network(input_shape, output_dim, params):
-    l1_val = 0.0
-    l2_val = 0.0
-    l1l2 = params.get("l1l2", [0.0, 0.0])
-    arr = np.asarray(l1l2, dtype=float).ravel()
-    if arr.size == 1:
-        l1_val = float(arr[0])
-        l2_val = float(arr[0])
-    elif arr.size >= 2:
-        l1_val = float(arr[0])
-        l2_val = float(arr[1])
+    arr = np.asarray(params.get("l1l2", [0.0, 0.0]), dtype=float).ravel()
+    if arr.size == 0:
+        l1_val, l2_val = 0.0, 0.0
+    elif arr.size == 1:
+        l1_val, l2_val = float(arr[0]), float(arr[0])
+    else:
+        l1_val, l2_val = float(arr[0]), float(arr[1])
 
     reg = regularizers.L1L2(l1=l1_val, l2=l2_val)
 
     dropout = params.get("Dropout", 0.0)
     if np.isscalar(dropout):
-        dropout_list = [float(dropout)]
+        dropout_rate = float(dropout)
     else:
-        dropout_list = [float(v) for v in np.asarray(dropout, dtype=float).ravel()]
+        dropout_rate = float(np.asarray(dropout, dtype=float).ravel()[0])
 
+    recurrent_dropout = float(params.get("recurrent_dropout", 0.0))
     lstm_units = [int(v) for v in np.asarray(params.get("lstm_units", [8])).ravel()]
     dense_archi = [int(v) for v in np.asarray(params.get("dense_archi", [])).ravel()]
 
@@ -210,25 +184,29 @@ def _build_lstm_network(input_shape, output_dim, params):
 
     for idx, units in enumerate(lstm_units):
         return_sequences = idx < len(lstm_units) - 1
-        do_rate = dropout_list[min(idx, len(dropout_list) - 1)] if len(dropout_list) > 0 else 0.0
-
         model.add(
             layers.LSTM(
                 units,
                 return_sequences=return_sequences,
-                dropout=do_rate,
-                recurrent_dropout=0.0,
+                dropout=dropout_rate,
+                recurrent_dropout=recurrent_dropout,
                 kernel_regularizer=reg,
                 recurrent_regularizer=reg,
                 bias_regularizer=reg,
             )
         )
 
-    for idx, units in enumerate(dense_archi):
-        do_rate = dropout_list[min(idx + len(lstm_units), len(dropout_list) - 1)] if len(dropout_list) > 0 else 0.0
-        model.add(layers.Dense(units, activation="relu", kernel_regularizer=reg, bias_regularizer=reg))
-        if do_rate > 0:
-            model.add(layers.Dropout(do_rate))
+    for units in dense_archi:
+        model.add(
+            layers.Dense(
+                units,
+                activation="relu",
+                kernel_regularizer=reg,
+                bias_regularizer=reg,
+            )
+        )
+        if dropout_rate > 0:
+            model.add(layers.Dropout(dropout_rate))
 
     model.add(layers.Dense(output_dim, activation="linear"))
 
@@ -236,20 +214,49 @@ def _build_lstm_network(input_shape, output_dim, params):
         optimizer=_make_optimizer(params),
         loss=_make_loss(params),
     )
-
     return model
+
+
+def _build_inner_candidates(params):
+    dropout_vals = params["Dropout"]
+    l1l2_vals = params["l1l2"]
+
+    if np.isscalar(dropout_vals):
+        dropout_vals = [float(dropout_vals)]
+    else:
+        dropout_vals = [float(v) for v in np.asarray(dropout_vals, dtype=float).ravel()]
+
+    l1l2_arr = np.asarray(l1l2_vals, dtype=float)
+    if l1l2_arr.ndim == 1:
+        l1l2_candidates = [l1l2_arr.tolist()]
+    else:
+        l1l2_candidates = [row.tolist() for row in l1l2_arr]
+
+    inner_grid = {
+        "Dropout": dropout_vals,
+        "l1l2": l1l2_candidates,
+    }
+
+    candidates = []
+    for combo in ParameterGrid(inner_grid):
+        cand = copy.deepcopy(params)
+        cand["Dropout"] = float(combo["Dropout"])
+        cand["l1l2"] = list(combo["l1l2"])
+        candidates.append(cand)
+
+    return candidates
 
 
 def _split_train_val(X_model, Y_model, validation_split):
     n = X_model.shape[0]
-    if n < 5:
+    if n < 6:
         return None
 
     val_len = int(np.ceil(n * float(validation_split)))
     val_len = max(val_len, 1)
     fit_end = n - val_len
 
-    if fit_end < 1:
+    if fit_end < 2:
         return None
 
     X_fit = X_model[:fit_end]
@@ -257,10 +264,22 @@ def _split_train_val(X_model, Y_model, validation_split):
     X_val = X_model[fit_end:]
     Y_val = Y_model[fit_end:]
 
-    if X_fit.shape[0] < 1 or X_val.shape[0] < 1:
+    if X_fit.shape[0] < 2 or X_val.shape[0] < 1:
         return None
 
     return X_fit, Y_fit, X_val, Y_val
+
+
+def _fit_standardizer(X_fit):
+    flat = X_fit.reshape(-1, X_fit.shape[-1])
+    mu = np.nanmean(flat, axis=0)
+    sd = np.nanstd(flat, axis=0, ddof=0)
+    sd[sd < 1e-12] = 1.0
+    return mu, sd
+
+
+def _apply_standardizer(X, mu, sd):
+    return (X - mu[None, None, :]) / sd[None, None, :]
 
 
 def _fit_one_seed(X_model, Y_model, X_test, params, seed):
@@ -273,6 +292,12 @@ def _fit_one_seed(X_model, Y_model, X_test, params, seed):
         raise ValueError("Not enough training observations after validation split.")
 
     X_fit, Y_fit, X_val, Y_val = split
+
+    if bool(params.get("standardize_x", True)):
+        mu, sd = _fit_standardizer(X_fit)
+        X_fit = _apply_standardizer(X_fit, mu, sd)
+        X_val = _apply_standardizer(X_val, mu, sd)
+        X_test = _apply_standardizer(X_test, mu, sd)
 
     _set_all_seeds(seed)
     keras.backend.clear_session()
@@ -324,11 +349,11 @@ def _run_multi_seed(X_model, Y_model, X_test, params, nmc):
     return outputs
 
 
-def build_lstm_model_input(X, Y, i, horizon, seq_len):
+def build_lstm_model_input(X, Y, forecast_idx, horizon, seq_len):
     X = np.asarray(X, dtype=float)
     Y = np.asarray(Y, dtype=float)
 
-    train_end = i - horizon
+    train_end = forecast_idx - horizon
     if train_end < seq_len - 1:
         return None, None
 
@@ -346,57 +371,23 @@ def build_lstm_model_input(X, Y, i, horizon, seq_len):
     if len(X_list) == 0:
         return None, None
 
-    X_model = np.stack(X_list, axis=0)
-    Y_model = np.stack(Y_list, axis=0)
-    return X_model, Y_model
+    return np.stack(X_list, axis=0), np.stack(Y_list, axis=0)
 
 
-def build_lstm_test_input(X, i, seq_len):
+def build_lstm_test_input(X, forecast_idx, seq_len):
     X = np.asarray(X, dtype=float)
 
-    if i < seq_len - 1:
+    if forecast_idx < seq_len - 1:
         return None
 
-    x_seq = X[i - seq_len + 1 : i + 1, :]
+    x_seq = X[forecast_idx - seq_len + 1 : forecast_idx + 1, :]
     if not np.all(np.isfinite(x_seq)):
         return None
 
     return x_seq[None, :, :]
 
 
-def _build_inner_candidates(params):
-    dropout_vals = params["Dropout"]
-    l1l2_vals = params["l1l2"]
-
-    if np.isscalar(dropout_vals):
-        dropout_vals = [float(dropout_vals)]
-    else:
-        dropout_vals = [float(v) for v in np.asarray(dropout_vals, dtype=float).ravel()]
-
-    l1l2_arr = np.asarray(l1l2_vals, dtype=float)
-    if l1l2_arr.ndim == 1:
-        l1l2_candidates = [l1l2_arr.tolist()]
-    else:
-        l1l2_candidates = [row.tolist() for row in l1l2_arr]
-
-    inner_grid = {
-        "Dropout": dropout_vals,
-        "l1l2": l1l2_candidates,
-    }
-
-    candidates = []
-    for combo in ParameterGrid(inner_grid):
-        cand = copy.deepcopy(params)
-        cand["Dropout"] = float(combo["Dropout"])
-        cand["l1l2"] = list(combo["l1l2"])
-        candidates.append(cand)
-
-    return candidates
-
-
-def _select_best_candidate(X_model, Y_model, X_test, cfg, refit):
-    del refit  # kept for interface consistency
-
+def _select_best_candidate(X_model, Y_model, X_test, cfg):
     candidates = _build_inner_candidates(cfg["params"])
 
     best_outputs = None
@@ -423,6 +414,16 @@ def _select_best_candidate(X_model, Y_model, X_test, cfg, refit):
     return best_outputs, best_params
 
 
+def _fit_fixed_candidate(X_model, Y_model, X_test, params, nmc):
+    return _run_multi_seed(
+        X_model=X_model,
+        Y_model=Y_model,
+        X_test=X_test,
+        params=params,
+        nmc=int(nmc),
+    )
+
+
 def run_oos_forecast(X, Y, dates, cfg):
     model_name = cfg["model_name"]
     seq_len = int(cfg["params"]["seq_len"])
@@ -438,69 +439,83 @@ def run_oos_forecast(X, Y, dates, cfg):
     T, M = Y.shape
     nmc = int(cfg["nmc"])
     navg = int(cfg["navg"])
+    hyper_freq = int(cfg["hyper_freq"])
 
     Y_forecast_all = np.full((T, nmc, M), np.nan)
     Y_forecast_avg = np.full((T, M), np.nan)
     val_loss = np.full((T, nmc), np.nan)
 
+    best_dropout_path = np.full(T, np.nan)
+    best_l1_path = np.full(T, np.nan)
+    best_l2_path = np.full(T, np.nan)
+
     print(model_name)
 
-    oos_counter = 0
-    best_val_since_refit = np.inf
-    prev_best_val = np.nan
+    current_best_params = None
     total_oos = len(oos_indices)
+    oos_counter = 0
 
     for j, i in enumerate(oos_indices, start=1):
         X_model, Y_model = build_lstm_model_input(
             X=X,
             Y=Y,
-            i=i,
+            forecast_idx=i,
             horizon=cfg["horizon"],
             seq_len=seq_len,
         )
-        X_test = build_lstm_test_input(X=X, i=i, seq_len=seq_len)
+        X_test = build_lstm_test_input(
+            X=X,
+            forecast_idx=i,
+            seq_len=seq_len,
+        )
 
         if X_model is None or Y_model is None or X_test is None:
             continue
 
         oos_counter += 1
+        retune = (oos_counter == 1) or ((oos_counter - 1) % hyper_freq == 0)
 
-        if oos_counter == 1:
-            refit = True
-        elif oos_counter % int(cfg["hyper_freq"]) == 0:
-            refit = bool(np.isfinite(prev_best_val) and prev_best_val > best_val_since_refit)
+        if retune:
+            outputs, current_best_params = _select_best_candidate(
+                X_model=X_model,
+                Y_model=Y_model,
+                X_test=X_test,
+                cfg=cfg,
+            )
         else:
-            refit = False
-
-        outputs, best_params = _select_best_candidate(
-            X_model=X_model,
-            Y_model=Y_model,
-            X_test=X_test,
-            cfg=cfg,
-            refit=refit,
-        )
+            outputs = _fit_fixed_candidate(
+                X_model=X_model,
+                Y_model=Y_model,
+                X_test=X_test,
+                params=current_best_params,
+                nmc=nmc,
+            )
 
         val_loss[i, :] = np.array([outputs[k][1] for k in range(nmc)], dtype=float)
 
-        yhat_list = []
+        pred_list = []
         for k in range(nmc):
-            pred_k = outputs[k][0]
-            pred_k = np.asarray(pred_k, dtype=float)
+            pred_k = np.asarray(outputs[k][0], dtype=float)
             if pred_k.ndim == 1:
                 pred_k = pred_k.reshape(1, -1)
-            yhat_list.append(pred_k)
+            pred_list.append(pred_k)
 
-        Y_forecast_all[i, :, :] = np.concatenate(yhat_list, axis=0)
+        Y_forecast_all[i, :, :] = np.concatenate(pred_list, axis=0)
 
         best_seed_order = np.argsort(val_loss[i, :])
         Y_forecast_avg[i, :] = np.mean(Y_forecast_all[i, best_seed_order[:navg], :], axis=0)
 
-        current_best_val = np.nanmin(val_loss[i, :])
-        if refit:
-            best_val_since_refit = current_best_val
+        best_dropout_path[i] = float(current_best_params["Dropout"])
+
+        reg_arr = np.asarray(current_best_params["l1l2"], dtype=float).ravel()
+        if reg_arr.size == 1:
+            best_l1_path[i] = float(reg_arr[0])
+            best_l2_path[i] = float(reg_arr[0])
         else:
-            best_val_since_refit = min(best_val_since_refit, current_best_val)
-        prev_best_val = current_best_val
+            best_l1_path[i] = float(reg_arr[0])
+            best_l2_path[i] = float(reg_arr[1])
+
+        current_best_val = np.nanmin(val_loss[i, :])
 
         if (j == 1) or (j % 12 == 0) or (j == total_oos):
             r2_now = np.array(
@@ -509,14 +524,14 @@ def run_oos_forecast(X, Y, dates, cfg):
             print(
                 f"[{j:4d}/{total_oos}] "
                 f"date={dates[i].strftime('%Y-%m-%d')} | "
-                f"refit={refit} | "
+                f"retune={retune} | "
                 f"val={current_best_val:10.6f} | "
-                f"seq={best_params['seq_len']} | "
-                f"lstm={best_params['lstm_units']} | "
-                f"dense={best_params['dense_archi']} | "
-                f"do={best_params['Dropout']} | "
-                f"l1l2={best_params['l1l2']} | "
-                f"lr={best_params['learning_rate']}"
+                f"seq={current_best_params['seq_len']} | "
+                f"lstm={current_best_params['lstm_units']} | "
+                f"dense={current_best_params['dense_archi']} | "
+                f"do={current_best_params['Dropout']} | "
+                f"l1l2={current_best_params['l1l2']} | "
+                f"lr={current_best_params['learning_rate']}"
             )
             print("  R2OOS:", np.round(r2_now, 4))
 
@@ -529,15 +544,14 @@ def run_oos_forecast(X, Y, dates, cfg):
         f"MSE_{model_name}": mse_vec,
         f"R2OOS_{model_name}": r2_vec,
         f"R2OOS_pval_{model_name}": pval_vec,
+        f"BestDropout_{model_name}": best_dropout_path,
+        f"BestL1_{model_name}": best_l1_path,
+        f"BestL2_{model_name}": best_l2_path,
     }
 
 
 def run_experiment(custom_config=None):
     cfg = copy.deepcopy(custom_config if custom_config is not None else BASE_CONFIG)
-
-    dump_dir = make_dump_dir()
-    ncpus = get_cpu_count()
-    del ncpus  # kept only for interface familiarity
 
     X_df, Y_df = load_dataset(
         mat_path=cfg["mat_path"],
@@ -549,6 +563,11 @@ def run_experiment(custom_config=None):
     Y = Y_df.to_numpy(dtype=float)
     dates = pd.DatetimeIndex(X_df.index)
 
+    print(f"X shape: {X.shape}, Y shape: {Y.shape}")
+    print(f"OOS start: {cfg['oos_start']}")
+    print(f"Feature groups: {cfg['feature_groups']}")
+    print(f"Params: {json.dumps(cfg['params'])}")
+
     save_dict = build_save_dict(cfg, X_df, Y_df, Y)
     save_dict.update(run_oos_forecast(X, Y, dates, cfg))
 
@@ -557,7 +576,7 @@ def run_experiment(custom_config=None):
     sio.savemat(out_mat, save_dict)
 
     print("Saved to", out_mat)
-    safe_rmtree(dump_dir)
+    print("R2OOS:", save_dict[f"R2OOS_{cfg['model_name']}"])
 
     return save_dict, out_mat, X_df.columns.tolist(), Y_df.columns.tolist()
 
@@ -570,8 +589,6 @@ def build_sweep_configs(base_config, sweep_grid):
         cfg["params"]["seq_len"] = int(combo["seq_len"])
         cfg["params"]["lstm_units"] = list(combo["lstm_units"])
         cfg["params"]["dense_archi"] = list(combo["dense_archi"])
-        cfg["params"]["Dropout"] = list(combo["Dropout"])
-        cfg["params"]["l1l2"] = list(combo["l1l2"])
         cfg["params"]["learning_rate"] = float(combo["learning_rate"])
         cfg_list.append(cfg)
 
