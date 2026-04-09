@@ -32,27 +32,27 @@ RUN_MODE = "sweep"   # "single" or "sweep"
 
 BASE_CONFIG = {
     "mat_path": "data/target_and_features.mat",
-    "feature_groups": ["dy_pc","macropc"],
+    "feature_groups": ["dy_pc1","dy_pc2"],
     "target_group": "dy",
     "horizon": 12,
     "oos_start": "1989-01-31",
     "hyper_freq": 60,          # retune inner hyperparameters every 60 OOS steps
-    "nmc": 1,
-    "navg": 1,
-    "run_tag": "pc_lstm",
+    "nmc": 5,
+    "navg": 3,
+    "run_tag": "pc_lstm_realtest",
     "model_name": "LSTMModel",
     "params": {
         "seq_len": 12,
         "lstm_units": [8],
         "dense_archi": [],
         "Dropout": [0.0],              # inner candidates
-        "l1l2": [1e-4, 1e-5],          # inner candidates or one pair
+        "l1l2": [1e-5, 1e-4],          # inner candidates or one pair
         "learning_rate": 0.005,
         "momentum": 0.9,
         "nesterov": True,
         "clipnorm": 1.0,
         "standardize_x": True,
-        "recurrent_dropout": 0.0,
+        "recurrent_dropout": 0.00,
         "epochs": 500,
         "patience": 20,
         "batch_size": 32,
@@ -67,8 +67,8 @@ BASE_CONFIG = {
 SWEEP_GRID = {
     "seq_len": [12],
     "lstm_units": [[8], [16]],
-    "dense_archi": [[], [8]],
-    "learning_rate": [0.01, 0.003],
+    "dense_archi": [[], [3]],
+    "learning_rate": [0.02, 0.003],
 }
 
 
