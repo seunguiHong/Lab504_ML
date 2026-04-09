@@ -103,7 +103,7 @@ function build_target_and_features(in_csv, out_mat)
     ext_vn = string(T_Ext.Properties.VariableNames);
 
     is_iv      = startsWith(ext_vn, "ATM_IV_");
-    is_macropc = ~cellfun('isempty', regexp(ext_vn, '^F\d+(\^3)?$', 'once'));
+    is_macropc = ~cellfun('isempty', regexp(ext_vn, '^F\d+$', 'once'));
     is_macro   = ~(is_iv | is_macropc);
 
     DY_dec = NaN(T, 9);

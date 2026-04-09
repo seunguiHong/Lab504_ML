@@ -14,7 +14,7 @@ from Utils import load_dataset, r2_oos, r2_oos_pvalue
 
 CONFIG = {
     "mat_path": "data/target_and_features.mat",
-    "feature_groups": ["dy_pc2"],
+    "feature_groups": ["dy_pc2","macro_pc"],
     "target_group": "dy",
     "horizon": 12,
     "oos_start": "1989-01-31",
