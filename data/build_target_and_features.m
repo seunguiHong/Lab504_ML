@@ -13,6 +13,9 @@ function build_target_and_features(in_csv, out_mat)
 
     Time = raw.Time(:);
 
+    % ------------------------------------------------------------
+    % Yield block
+    % ------------------------------------------------------------
     y_mask = ~cellfun('isempty', regexp(vn, '^m\d{3}$', 'once'));
     if sum(y_mask) < 120
         error("Insufficient yield columns: need at least m001..m120.");
@@ -99,9 +102,13 @@ function build_target_and_features(in_csv, out_mat)
     DY_PC2 = DY_PC(:, 2);
     DY_PC3 = DY_PC(:, 3);
 
+    % ------------------------------------------------------------
+    % External blocks
+    % ------------------------------------------------------------
     T_Ext  = raw(:, ~y_mask & vn ~= "Time");
     ext_vn = string(T_Ext.Properties.VariableNames);
 
+    % keep old behavior
     is_iv      = startsWith(ext_vn, "ATM_IV_");
     is_macropc = ~cellfun('isempty', regexp(ext_vn, '^F\d+$', 'once'));
     is_macro   = ~(is_iv | is_macropc);
@@ -154,6 +161,7 @@ function build_target_and_features(in_csv, out_mat)
     X.iv.data  = table2array(T_Ext(:, is_iv));
     X.iv.names = cellstr(string(T_Ext.Properties.VariableNames(is_iv)));
 
+    % keep old behavior
     X.macropc.Time  = Time;
     X.macropc.data  = table2array(T_Ext(:, is_macropc));
     X.macropc.names = cellstr(string(T_Ext.Properties.VariableNames(is_macropc)));
@@ -170,12 +178,128 @@ function build_target_and_features(in_csv, out_mat)
     y.dy.data  = DY_pct;
     y.dy.names = cellstr(compose('dy_%d', 1:9));
 
+    % ------------------------------------------------------------
+    % Macro group blocks
+    % ------------------------------------------------------------
+    macro_names = string(X.macro.names);
+    G = fred_md_group_definitions();
+
+    is_output  = ismember(macro_names, G.output);
+    is_labor   = ismember(macro_names, G.labor);
+    is_housing = ismember(macro_names, G.housing);
+    is_orders  = ismember(macro_names, G.orders);
+    is_money   = ismember(macro_names, G.money);
+    is_ratesfx = ismember(macro_names, G.ratesfx);
+    is_prices  = ismember(macro_names, G.prices);
+    is_stock   = ismember(macro_names, G.stock);
+
+    is_any_group = is_output | is_labor | is_housing | is_orders | ...
+                   is_money | is_ratesfx | is_prices | is_stock;
+    is_other = ~is_any_group;
+
+    X.macro_output  = make_block(Time, X.macro.data(:, is_output),  macro_names(is_output));
+    X.macro_labor   = make_block(Time, X.macro.data(:, is_labor),   macro_names(is_labor));
+    X.macro_housing = make_block(Time, X.macro.data(:, is_housing), macro_names(is_housing));
+    X.macro_orders  = make_block(Time, X.macro.data(:, is_orders),  macro_names(is_orders));
+    X.macro_money   = make_block(Time, X.macro.data(:, is_money),   macro_names(is_money));
+    X.macro_ratesfx = make_block(Time, X.macro.data(:, is_ratesfx), macro_names(is_ratesfx));
+    X.macro_prices  = make_block(Time, X.macro.data(:, is_prices),  macro_names(is_prices));
+    X.macro_stock   = make_block(Time, X.macro.data(:, is_stock),   macro_names(is_stock));
+    X.macro_other   = make_block(Time, X.macro.data(:, is_other),   macro_names(is_other));
+
     meta = struct();
     meta.in_csv  = char(in_csv);
     meta.out_mat = char(out_mat);
     meta.X_units = 'decimals';
     meta.y_units = 'percent';
 
+    meta.macro_group_names = { ...
+        'macro_output', ...
+        'macro_labor', ...
+        'macro_housing', ...
+        'macro_orders', ...
+        'macro_money', ...
+        'macro_ratesfx', ...
+        'macro_prices', ...
+        'macro_stock', ...
+        'macro_other'};
+
     save(out_mat, 'X', 'y', 'meta', '-v7');
+
+end
+
+% ============================================================
+% helper: block creator
+% ============================================================
+function B = make_block(Time, data, names)
+    B = struct();
+    B.Time  = Time;
+    B.data  = data;
+    B.names = cellstr(names(:)');
+end
+
+% ============================================================
+% helper: FRED-MD group mapping
+% based on variable names in your 2025-12-MD.csv / fred_md_processed.csv
+% ============================================================
+function G = fred_md_group_definitions()
+
+    G = struct();
+
+    % 1. Output / income
+    G.output = string({ ...
+        'RPI','W875RX1','DPCERA3M086SBEA','CMRMTSPLx','RETAILx', ...
+        'INDPRO','IPFPNSS','IPFINAL','IPCONGD','IPDCONGD','IPNCONGD', ...
+        'IPBUSEQ','IPMAT','IPDMAT','IPNMAT','IPMANSICS','IPB51222S','IPFUELS', ...
+        'CUMFNS', ...
+        'DTCOLNVHFNM','DTCTHFNM','INVEST' ...
+    });
+
+    % 2. Labor market
+    G.labor = string({ ...
+        'HWI','HWIURATIO','CLF16OV','CE16OV','UNRATE','UEMPMEAN', ...
+        'UEMPLT5','UEMP5TO14','UEMP15OV','UEMP15T26','UEMP27OV','CLAIMSx', ...
+        'PAYEMS','USGOOD','CES1021000001','USCONS','MANEMP','DMANEMP', ...
+        'NDMANEMP','SRVPRD','USTPU','USWTRADE','USTRADE','USFIRE','USGOVT', ...
+        'CES0600000007','AWOTMAN','AWHMAN', ...
+        'CES0600000008','CES2000000008','CES3000000008' ...
+    });
+
+    % 3. Housing
+    G.housing = string({ ...
+        'HOUST','HOUSTNE','HOUSTMW','HOUSTS','HOUSTW', ...
+        'PERMIT','PERMITNE','PERMITMW','PERMITS','PERMITW' ...
+    });
+
+    % 4. Orders / inventories
+    G.orders = string({ ...
+        'ACOGNO','AMDMNOx','ANDENOx','AMDMUOx','BUSINVx','ISRATIOx' ...
+    });
+
+    % 5. Money / credit
+    G.money = string({ ...
+        'M1SL','M2SL','M2REAL','BOGMBASE','TOTRESNS','NONBORRES', ...
+        'BUSLOANS','REALLN','NONREVSL','CONSPI' ...
+    });
+
+    % 6. Rates / FX / bond market / financial conditions
+    G.ratesfx = string({ ...
+        'FEDFUNDS','CP3Mx','TB3MS','TB6MS','GS1','GS5','GS10','AAA','BAA', ...
+        'COMPAPFFx','TB3SMFFM','TB6SMFFM','T1YFFM','T5YFFM','T10YFFM', ...
+        'AAAFFM','BAAFFM','TWEXAFEGSMTHx','EXSZUSx','EXJPUSx','EXUSUKx','EXCAUSx' ...
+    });
+
+    % 7. Prices
+    G.prices = string({ ...
+        'WPSFD49207','WPSFD49502','WPSID61','WPSID62','OILPRICEx','PPICMM', ...
+        'CPIAUCSL','CPIAPPSL','CPITRNSL','CPIMEDSL','CUSR0000SAC','CUSR0000SAD', ...
+        'CUSR0000SAS','CPIULFSL','CUSR0000SA0L2','CUSR0000SA0L5','PCEPI', ...
+        'DDURRG3M086SBEA','DNDGRG3M086SBEA','DSERRG3M086SBEA' ...
+    });
+
+    % 8. Stock market / sentiment / volatility
+    G.stock = string({ ...
+        'S&P 500','S&P div yield','S&P PE ratio','UMCSENTx','VIXCLSx' ...
+    });
 
 end
