@@ -11,7 +11,6 @@ import json
 
 import numpy as np
 import pandas as pd
-import scipy.io as sio
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, regularizers
@@ -26,9 +25,10 @@ from utils import (
     save_results_mat,
 )
 
+
 BASE_CONFIG = {
     "mat_path": "data/target_and_features.mat",
-    "feature_groups": ["dy_pc1", "dy_pc2"],
+    "feature_groups": ["dy_pc1", "dy_pc2", "dy_pc3"],
     "target_group": "dy",
     "target_indices": None,
     "horizon": 12,
@@ -36,7 +36,7 @@ BASE_CONFIG = {
     "hyper_freq": 60,
     "nmc": 5,
     "navg": 3,
-    "run_tag": "pc12_lstm",
+    "run_tag": "pc123_lstm",
     "model_name": "LSTMModel",
     "results_dir": "results",
     "params": {
@@ -49,8 +49,8 @@ BASE_CONFIG = {
         "momentum": 0.9,
         "nesterov": True,
         "clipnorm": 1.0,
-        "standardize_x": True,
         "recurrent_dropout": 0.0,
+        "standardize_x": True,
         "epochs": 500,
         "patience": 20,
         "batch_size": 32,
@@ -122,7 +122,7 @@ def _make_loss(params: dict):
     raise ValueError(f"Unknown loss_name: {loss_name}")
 
 
-def _build_lstm_network(input_shape, output_dim, params: dict):
+def _build_lstm_network(input_shape, output_dim: int, params: dict):
     l1_val, l2_val = _normalize_l1l2(params.get("l1l2", [0.0, 0.0]))
     reg = regularizers.L1L2(l1=l1_val, l2=l2_val)
 
@@ -131,14 +131,14 @@ def _build_lstm_network(input_shape, output_dim, params: dict):
     lstm_units = [int(v) for v in np.asarray(params.get("lstm_units", [8]), dtype=int).ravel()]
     dense_archi = [int(v) for v in np.asarray(params.get("dense_archi", []), dtype=int).ravel()]
 
-    model = keras.Sequential()
+    model = keras.Sequential(name="LSTMModel")
     model.add(layers.Input(shape=input_shape))
 
-    for i, units in enumerate(lstm_units):
+    for idx, units in enumerate(lstm_units):
         model.add(
             layers.LSTM(
-                units,
-                return_sequences=(i < len(lstm_units) - 1),
+                units=int(units),
+                return_sequences=(idx < len(lstm_units) - 1),
                 dropout=dropout_rate,
                 recurrent_dropout=recurrent_dropout,
                 kernel_regularizer=reg,
@@ -150,25 +150,25 @@ def _build_lstm_network(input_shape, output_dim, params: dict):
     for units in dense_archi:
         model.add(
             layers.Dense(
-                units,
+                int(units),
                 activation="relu",
                 kernel_regularizer=reg,
                 bias_regularizer=reg,
             )
         )
-        if dropout_rate > 0:
+        if dropout_rate > 0.0:
             model.add(layers.Dropout(dropout_rate))
 
-    model.add(layers.Dense(output_dim, activation="linear"))
+    model.add(layers.Dense(int(output_dim), activation="linear"))
     model.compile(optimizer=_make_optimizer(params), loss=_make_loss(params))
     return model
 
 
-def _build_lstm_training_tensors(X, Y, forecast_idx: int, horizon: int, seq_len: int):
+def _build_sequence_training_tensors(X, Y, forecast_index: int, horizon: int, seq_len: int):
     X = np.asarray(X, dtype=float)
     Y = np.asarray(Y, dtype=float)
 
-    train_end = forecast_idx - horizon
+    train_end = int(forecast_index - horizon)
     if train_end < seq_len - 1:
         return None, None
 
@@ -178,7 +178,6 @@ def _build_lstm_training_tensors(X, Y, forecast_idx: int, horizon: int, seq_len:
     for t in range(seq_len - 1, train_end + 1):
         x_seq = X[t - seq_len + 1: t + 1, :]
         y_t = Y[t, :]
-
         if np.all(np.isfinite(x_seq)) and np.all(np.isfinite(y_t)):
             X_list.append(x_seq)
             Y_list.append(y_t)
@@ -189,13 +188,13 @@ def _build_lstm_training_tensors(X, Y, forecast_idx: int, horizon: int, seq_len:
     return np.stack(X_list, axis=0), np.stack(Y_list, axis=0)
 
 
-def _build_lstm_test_tensor(X, forecast_idx: int, seq_len: int):
+def _build_sequence_test_tensor(X, forecast_index: int, seq_len: int):
     X = np.asarray(X, dtype=float)
 
-    if forecast_idx < seq_len - 1:
+    if forecast_index < seq_len - 1:
         return None
 
-    x_seq = X[forecast_idx - seq_len + 1: forecast_idx + 1, :]
+    x_seq = X[forecast_index - seq_len + 1: forecast_index + 1, :]
     if not np.all(np.isfinite(x_seq)):
         return None
 
@@ -312,7 +311,7 @@ def _fit_final_seed(X_train, Y_train, X_test, params: dict, epochs_final: int, s
     model.fit(
         X_train_final,
         Y_train_final,
-        epochs=int(epochs_final),
+        epochs=max(1, int(epochs_final)),
         batch_size=int(params["batch_size"]),
         shuffle=bool(params.get("shuffle", False)),
         verbose=0,
@@ -331,7 +330,7 @@ def _fit_final_multi_seed(X_train, Y_train, X_test, params: dict, best_eval: dic
             Y_train=Y_train,
             X_test=X_test,
             params=params,
-            epochs_final=max(1, epochs_k),
+            epochs_final=epochs_k,
             seed=1234 + k,
         )
         outputs[k] = (pred_k, float(best_eval["val_losses"][k]))
@@ -347,10 +346,10 @@ def run_oos_forecast(X, Y, dates, cfg: dict):
     hyper_freq = int(cfg["hyper_freq"])
 
     dates = pd.DatetimeIndex(dates)
-    start_idx = np.where(dates >= pd.Timestamp(cfg["oos_start"]))[0]
-    if start_idx.size == 0:
+    start_candidates = np.where(dates >= pd.Timestamp(cfg["oos_start"]))[0]
+    if start_candidates.size == 0:
         raise ValueError("No available sample date on or after oos_start.")
-    oos_indices = list(range(int(start_idx[0]), len(dates)))
+    oos_indices = list(range(int(start_candidates[0]), len(dates)))
 
     T, M = Y.shape
     Y_forecast_all = np.full((T, nmc, M), np.nan)
@@ -370,17 +369,17 @@ def run_oos_forecast(X, Y, dates, cfg: dict):
     oos_counter = 0
     total_oos = len(oos_indices)
 
-    for j, i in enumerate(oos_indices, start=1):
-        X_train, Y_train = _build_lstm_training_tensors(
+    for j, forecast_index in enumerate(oos_indices, start=1):
+        X_train, Y_train = _build_sequence_training_tensors(
             X=X,
             Y=Y,
-            forecast_idx=i,
+            forecast_index=forecast_index,
             horizon=horizon,
             seq_len=seq_len,
         )
-        X_test = _build_lstm_test_tensor(
+        X_test = _build_sequence_test_tensor(
             X=X,
-            forecast_idx=i,
+            forecast_index=forecast_index,
             seq_len=seq_len,
         )
 
@@ -406,20 +405,20 @@ def run_oos_forecast(X, Y, dates, cfg: dict):
             nmc=nmc,
         )
 
-        val_loss[i, :] = np.array([outputs[k][1] for k in range(nmc)], dtype=float)
-        Y_forecast_all[i, :, :] = np.vstack([outputs[k][0] for k in range(nmc)])
+        val_loss[forecast_index, :] = np.array([outputs[k][1] for k in range(nmc)], dtype=float)
+        Y_forecast_all[forecast_index, :, :] = np.vstack([outputs[k][0] for k in range(nmc)])
 
-        best_seed_order = np.argsort(val_loss[i, :])
-        Y_forecast_avg[i, :] = np.mean(
-            Y_forecast_all[i, best_seed_order[:navg], :],
+        best_seed_order = np.argsort(val_loss[forecast_index, :])
+        Y_forecast_avg[forecast_index, :] = np.mean(
+            Y_forecast_all[forecast_index, best_seed_order[:navg], :],
             axis=0,
         )
 
         reg_arr = np.asarray(current_best_params["l1l2"], dtype=float).ravel()
-        best_dropout_path[i] = float(current_best_params["Dropout"])
-        best_l1_path[i] = float(reg_arr[0])
-        best_l2_path[i] = float(reg_arr[1] if reg_arr.size >= 2 else reg_arr[0])
-        best_epoch_mean_path[i] = float(np.mean(current_best_eval["best_epochs"]))
+        best_dropout_path[forecast_index] = float(current_best_params["Dropout"])
+        best_l1_path[forecast_index] = float(reg_arr[0])
+        best_l2_path[forecast_index] = float(reg_arr[1] if reg_arr.size >= 2 else reg_arr[0])
+        best_epoch_mean_path[forecast_index] = float(np.mean(current_best_eval["best_epochs"]))
 
         current_best_val = float(np.nanmean(current_best_eval["val_losses"]))
 
@@ -429,7 +428,7 @@ def run_oos_forecast(X, Y, dates, cfg: dict):
             )
             print(
                 f"[{j:4d}/{total_oos}] "
-                f"date={dates[i].strftime('%Y-%m-%d')} | "
+                f"date={dates[forecast_index].strftime('%Y-%m-%d')} | "
                 f"retune={retune} | "
                 f"val={current_best_val:10.6f} | "
                 f"seq={current_best_params['seq_len']} | "

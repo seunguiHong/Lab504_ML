@@ -8,19 +8,17 @@ os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
 import copy
 import json
+import multiprocessing as mp
 
 import numpy as np
 import pandas as pd
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers, regularizers
 
+import NNFuncBib as NFB
 from utils import (
     get_cpu_count,
+    make_dump_dir,
+    safe_rmtree,
     load_dataset,
-    enumerate_oos_forecast_indices,
-    prepare_validation_matrices,
-    prepare_final_training_matrices,
     summarize_oos_metrics,
     build_save_dict,
     result_name,
@@ -29,41 +27,96 @@ from utils import (
 
 BASE_CONFIG = {
     "mat_path": "data/target_and_features.mat",
-    "feature_groups": ["dy_pc1", "dy_pc2"],
+    "feature_groups": ["dy_pc"],
     "target_group": "dy",
     "target_indices": None,
     "horizon": 12,
     "oos_start": "1989-01-31",
     "hyper_freq": 60,
     "nmc": 20,
-    "navg": 10,
+    "navg": 5,
     "run_tag": "pc12",
+    "model_func": NFB.NNModel,
     "model_name": "NNModel",
     "results_dir": "results",
     "params": {
-        "archi": [3, 3],
+        "archi": [3.3],
         "Dropout": [0.0],
-        "l1l2": [1e-4, 5e-5],
+        "l1l2": [1e-4, 1e-5],
         "learning_rate": 0.03,
+        "decay_rate": 0.001,
         "momentum": 0.9,
         "nesterov": True,
         "epochs": 500,
         "patience": 20,
         "batch_size": 32,
         "validation_split": 0.15,
-        "purge_size": 12,
         "shuffle": False,
-        "standardize_x": True,
-        "loss_name": "mse",
+        "loss_name": "huber",
         "huber_delta": 1.0,
     },
 }
 
 
-def _set_seed(seed: int) -> None:
-    np.random.seed(seed)
-    tf.random.set_seed(seed)
-    keras.utils.set_random_seed(seed)
+def build_model_input(X, Y, forecast_index, horizon):
+    """
+    Build the input expected by NNFuncBib.NNModel.
+
+    By convention, the last row is the forecast row.
+    Training data can only use information up to forecast_index - horizon.
+    """
+    X = np.asarray(X, dtype=float)
+    Y = np.asarray(Y, dtype=float)
+
+    train_end = int(forecast_index - horizon)
+    if train_end < 1:
+        return None, None
+
+    X_train = X[: train_end + 1, :]
+    Y_train = Y[: train_end + 1, :]
+    X_test = X[forecast_index : forecast_index + 1, :]
+    Y_test = Y[forecast_index : forecast_index + 1, :]
+
+    if X_test.shape[0] != 1 or Y_test.shape[0] != 1:
+        return None, None
+
+    X_model = np.vstack([X_train, X_test])
+    Y_model = np.vstack([Y_train, Y_test])
+
+    return X_model, Y_model
+
+
+def _worker_run_one_seed(args):
+    model_func, seed_no, X_model, Y_model, params, refit, dumploc = args
+    return model_func(
+        X=X_model,
+        Y=Y_model,
+        no=seed_no,
+        params=params,
+        refit=refit,
+        dumploc=dumploc,
+    )
+
+
+def run_parallel_seeds(model_func, ncpus, nmc, X_model, Y_model, params, refit, dumploc):
+    """
+    Run multiple seeds in parallel and return a dict:
+        outputs[k] = (y_pred, val_loss)
+    """
+    jobs = [
+        (model_func, k, X_model, Y_model, params, refit, dumploc)
+        for k in range(int(nmc))
+    ]
+
+    use_ncpus = min(int(ncpus), int(nmc))
+    if use_ncpus <= 1:
+        results = [_worker_run_one_seed(job) for job in jobs]
+    else:
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(processes=use_ncpus) as pool:
+            results = pool.map(_worker_run_one_seed, jobs)
+
+    return {k: results[k] for k in range(int(nmc))}
 
 
 def _normalize_l1l2(x):
@@ -75,7 +128,7 @@ def _normalize_l1l2(x):
     return [float(arr[0]), float(arr[1])]
 
 
-def _build_inner_candidates(params: dict):
+def _build_inner_candidates(params):
     dropout_raw = params["Dropout"]
     l1l2_raw = params["l1l2"]
 
@@ -101,161 +154,52 @@ def _build_inner_candidates(params: dict):
     return candidates
 
 
-def _make_loss(params: dict):
-    loss_name = str(params.get("loss_name", "mse")).lower()
-    if loss_name == "mse":
-        return "mse"
-    if loss_name == "huber":
-        return keras.losses.Huber(delta=float(params.get("huber_delta", 1.0)))
-    raise ValueError(f"Unknown loss_name: {loss_name}")
+def _select_best_candidate(X_model, Y_model, cfg, dumploc, ncpus, refit):
+    candidates = _build_inner_candidates(cfg["params"])
 
-
-def _make_optimizer(params: dict):
-    return keras.optimizers.SGD(
-        learning_rate=float(params["learning_rate"]),
-        momentum=float(params.get("momentum", 0.0)),
-        nesterov=bool(params.get("nesterov", False)),
-    )
-
-
-def _build_network(input_dim: int, output_dim: int, params: dict):
-    l1_val, l2_val = _normalize_l1l2(params.get("l1l2", [0.0, 0.0]))
-    reg = regularizers.L1L2(l1=l1_val, l2=l2_val)
-
-    archi = [int(v) for v in np.asarray(params.get("archi", []), dtype=int).ravel()]
-    dropout_rate = float(params.get("Dropout", 0.0))
-
-    model = keras.Sequential()
-    model.add(layers.Input(shape=(input_dim,)))
-
-    for units in archi:
-        model.add(layers.Dense(units, activation="relu", kernel_regularizer=reg, bias_regularizer=reg))
-        if dropout_rate > 0:
-            model.add(layers.Dropout(dropout_rate))
-
-    model.add(layers.Dense(output_dim, activation="linear"))
-    model.compile(optimizer=_make_optimizer(params), loss=_make_loss(params))
-    return model
-
-
-def _fit_validation_model(X_train, Y_train, params: dict, seed: int):
-    X_fit, Y_fit, X_val, Y_val, _ = prepare_validation_matrices(
-        X_train=X_train,
-        Y_train=Y_train,
-        validation_fraction=float(params["validation_split"]),
-        purge_size=int(params.get("purge_size", 12)),
-        standardize_features=bool(params.get("standardize_x", True)),
-    )
-
-    _set_seed(seed)
-    keras.backend.clear_session()
-
-    model = _build_network(
-        input_dim=X_fit.shape[1],
-        output_dim=Y_fit.shape[1],
-        params=params,
-    )
-
-    callbacks = [
-        keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=int(params["patience"]),
-            restore_best_weights=True,
-            verbose=0,
-        )
-    ]
-
-    model.fit(
-        X_fit,
-        Y_fit,
-        validation_data=(X_val, Y_val),
-        epochs=int(params["epochs"]),
-        batch_size=int(params["batch_size"]),
-        shuffle=bool(params.get("shuffle", False)),
-        verbose=0,
-        callbacks=callbacks,
-    )
-
-    Y_val_hat = model.predict(X_val, verbose=0)
-    val_loss = float(np.mean((Y_val - Y_val_hat) ** 2))
-    return val_loss
-
-
-def _fit_final_model(X_train, Y_train, X_test, params: dict, seed: int):
-    X_train_final, Y_train_final, X_test_final, _ = prepare_final_training_matrices(
-        X_train=X_train,
-        Y_train=Y_train,
-        X_test=X_test,
-        standardize_features=bool(params.get("standardize_x", True)),
-    )
-
-    _set_seed(seed)
-    keras.backend.clear_session()
-
-    model = _build_network(
-        input_dim=X_train_final.shape[1],
-        output_dim=Y_train_final.shape[1],
-        params=params,
-    )
-
-    callbacks = [
-        keras.callbacks.EarlyStopping(
-            monitor="loss",
-            patience=int(params["patience"]),
-            restore_best_weights=True,
-            verbose=0,
-        )
-    ]
-
-    model.fit(
-        X_train_final,
-        Y_train_final,
-        epochs=int(params["epochs"]),
-        batch_size=int(params["batch_size"]),
-        shuffle=bool(params.get("shuffle", False)),
-        verbose=0,
-        callbacks=callbacks,
-    )
-
-    Y_hat = model.predict(X_test_final, verbose=0)
-    return Y_hat
-
-
-def _select_hyperparameters(X_train, Y_train, params: dict, nmc: int):
-    candidates = _build_inner_candidates(params)
-
+    best_outputs = None
     best_params = None
     best_score = np.inf
 
-    for cand in candidates:
-        losses = []
-        for k in range(int(nmc)):
-            loss_k = _fit_validation_model(
-                X_train=X_train,
-                Y_train=Y_train,
-                params=cand,
-                seed=1234 + k,
-            )
-            losses.append(loss_k)
+    for cand_params in candidates:
+        outputs = run_parallel_seeds(
+            model_func=cfg["model_func"],
+            ncpus=ncpus,
+            nmc=int(cfg["nmc"]),
+            X_model=X_model,
+            Y_model=Y_model,
+            params=cand_params,
+            refit=refit,
+            dumploc=dumploc,
+        )
 
-        score = float(np.nanmean(losses))
+        val_vec = np.array([outputs[k][1] for k in range(int(cfg["nmc"]))], dtype=float)
+        score = float(np.nanmean(val_vec))
+
         if score < best_score:
             best_score = score
-            best_params = copy.deepcopy(cand)
+            best_outputs = outputs
+            best_params = cand_params
 
-    return best_params, best_score
+    return best_outputs, best_params, best_score
 
 
-def run_oos_forecast(X, Y, dates, cfg: dict):
+def run_oos_forecast(X, Y, dates, cfg, dumploc, ncpus):
     model_name = cfg["model_name"]
-    horizon = int(cfg["horizon"])
+
+    dates = pd.DatetimeIndex(dates)
+    start_candidates = np.where(dates >= pd.Timestamp(cfg["oos_start"]))[0]
+    if start_candidates.size == 0:
+        raise ValueError("No available sample date on or after oos_start.")
+
+    first_oos_idx = int(start_candidates[0])
+    oos_indices = list(range(first_oos_idx, X.shape[0]))
+
+    T, M = Y.shape
     nmc = int(cfg["nmc"])
     navg = int(cfg["navg"])
     hyper_freq = int(cfg["hyper_freq"])
 
-    oos_indices = enumerate_oos_forecast_indices(dates, cfg["oos_start"])
-
-    T, M = Y.shape
     Y_forecast_all = np.full((T, nmc, M), np.nan)
     Y_forecast_avg = np.full((T, M), np.nan)
     val_loss = np.full((T, nmc), np.nan)
@@ -265,63 +209,73 @@ def run_oos_forecast(X, Y, dates, cfg: dict):
     best_l2_path = np.full(T, np.nan)
 
     current_best_params = None
-    current_best_validation_score = np.nan
-
-    total_oos = len(oos_indices)
-    oos_counter = 0
+    current_best_score = np.nan
 
     print(model_name)
 
-    for j, forecast_idx in enumerate(oos_indices, start=1):
-        train_end = forecast_idx - horizon
-        if train_end < 1:
-            continue
+    oos_counter = 0
+    total_oos = len(oos_indices)
 
-        X_train = X[: train_end + 1, :]
-        Y_train = Y[: train_end + 1, :]
-        X_test = X[forecast_idx : forecast_idx + 1, :]
-
-        if not np.all(np.isfinite(X_test)):
-            continue
-
-        train_valid = np.all(np.isfinite(X_train), axis=1) & np.all(np.isfinite(Y_train), axis=1)
-        X_train = X_train[train_valid]
-        Y_train = Y_train[train_valid]
-
-        if X_train.shape[0] < 10:
+    for j, forecast_index in enumerate(oos_indices, start=1):
+        X_model, Y_model = build_model_input(
+            X=X,
+            Y=Y,
+            forecast_index=forecast_index,
+            horizon=int(cfg["horizon"]),
+        )
+        if X_model is None or Y_model is None:
             continue
 
         oos_counter += 1
         retune = (oos_counter == 1) or ((oos_counter - 1) % hyper_freq == 0)
 
         if retune:
-            current_best_params, current_best_validation_score = _select_hyperparameters(
-                X_train=X_train,
-                Y_train=Y_train,
-                params=cfg["params"],
+            outputs, current_best_params, current_best_score = _select_best_candidate(
+                X_model=X_model,
+                Y_model=Y_model,
+                cfg=cfg,
+                dumploc=dumploc,
+                ncpus=ncpus,
+                refit=True,
+            )
+        else:
+            outputs = run_parallel_seeds(
+                model_func=cfg["model_func"],
+                ncpus=ncpus,
                 nmc=nmc,
-            )
-
-        for k in range(nmc):
-            pred_k = _fit_final_model(
-                X_train=X_train,
-                Y_train=Y_train,
-                X_test=X_test,
+                X_model=X_model,
+                Y_model=Y_model,
                 params=current_best_params,
-                seed=1234 + k,
+                refit=False,
+                dumploc=dumploc,
             )
-            Y_forecast_all[forecast_idx, k, :] = np.asarray(pred_k, dtype=float).reshape(-1)
-            val_loss[forecast_idx, k] = float(current_best_validation_score)
 
-        best_seed_order = np.argsort(val_loss[forecast_idx, :])
-        Y_forecast_avg[forecast_idx, :] = np.mean(
-            Y_forecast_all[forecast_idx, best_seed_order[:navg], :],
+        val_loss[forecast_index, :] = np.array(
+            [outputs[k][1] for k in range(nmc)],
+            dtype=float,
+        )
+
+        pred_list = []
+        for k in range(nmc):
+            pred_k = np.asarray(outputs[k][0], dtype=float)
+            if pred_k.ndim == 1:
+                pred_k = pred_k.reshape(1, -1)
+            pred_list.append(pred_k)
+
+        Y_forecast_all[forecast_index, :, :] = np.concatenate(pred_list, axis=0)
+
+        best_seed_order = np.argsort(val_loss[forecast_index, :])
+        Y_forecast_avg[forecast_index, :] = np.mean(
+            Y_forecast_all[forecast_index, best_seed_order[:navg], :],
             axis=0,
         )
 
-        best_dropout_path[forecast_idx] = float(current_best_params["Dropout"])
-        best_l1_path[forecast_idx] = float(current_best_params["l1l2"][0])
-        best_l2_path[forecast_idx] = float(current_best_params["l1l2"][1])
+        reg_arr = np.asarray(current_best_params["l1l2"], dtype=float).ravel()
+        best_dropout_path[forecast_index] = float(current_best_params["Dropout"])
+        best_l1_path[forecast_index] = float(reg_arr[0])
+        best_l2_path[forecast_index] = float(reg_arr[1] if reg_arr.size >= 2 else reg_arr[0])
+
+        current_best_val = float(np.nanmean(val_loss[forecast_index, :]))
 
         if (j == 1) or (j % 12 == 0) or (j == total_oos):
             r2_now = np.array(
@@ -329,9 +283,9 @@ def run_oos_forecast(X, Y, dates, cfg: dict):
             )
             print(
                 f"[{j:4d}/{total_oos}] "
-                f"date={dates[forecast_idx].strftime('%Y-%m-%d')} | "
+                f"date={dates[forecast_index].strftime('%Y-%m-%d')} | "
                 f"retune={retune} | "
-                f"val={current_best_validation_score:10.6f} | "
+                f"val={current_best_val:10.6f} | "
                 f"arch={current_best_params['archi']} | "
                 f"do={current_best_params['Dropout']} | "
                 f"l1l2={current_best_params['l1l2']} | "
@@ -358,7 +312,7 @@ def run_experiment(custom_config=None):
     cfg = copy.deepcopy(custom_config if custom_config is not None else BASE_CONFIG)
 
     ncpus = get_cpu_count()
-    print(f"CPU count: {ncpus}")
+    dumploc = make_dump_dir()
 
     X_df, Y_df = load_dataset(
         mat_path=cfg["mat_path"],
@@ -371,8 +325,14 @@ def run_experiment(custom_config=None):
     Y = Y_df.to_numpy(dtype=float)
     dates = pd.DatetimeIndex(X_df.index)
 
+    print(f"CPU count: {ncpus}")
+    print(f"X shape: {X.shape}, Y shape: {Y.shape}")
+    print(f"OOS start: {cfg['oos_start']}")
+    print(f"Feature groups: {cfg['feature_groups']}")
+    print(f"Params: {json.dumps(cfg['params'])}")
+
     save_dict = build_save_dict(cfg, X_df, Y_df, Y)
-    save_dict.update(run_oos_forecast(X, Y, dates, cfg))
+    save_dict.update(run_oos_forecast(X, Y, dates, cfg, dumploc, ncpus))
 
     results_dir = cfg.get("results_dir", "results")
     os.makedirs(results_dir, exist_ok=True)
@@ -382,6 +342,8 @@ def run_experiment(custom_config=None):
 
     print("Saved to", out_mat)
     print("R2OOS:", np.round(save_dict[f"R2OOS_{cfg['model_name']}"], 4))
+
+    safe_rmtree(dumploc)
 
     return save_dict, out_mat, X_df.columns.tolist(), Y_df.columns.tolist()
 

@@ -28,37 +28,60 @@ function build_target_and_features(in_csv, out_mat)
         error("Yield matrix has fewer than 120 monthly maturities.");
     end
 
+    % Full annual nodes: 1y..10y
     y_annual = Y_all(:, 12:12:120);
     y_120    = Y_all(:, 1:120);
 
-    S = y_annual(:, 2:end) - y_annual(:, 1);
+    % Inputs use 2y..10y
+    y_input = y_annual(:, 2:10);
 
-    S_chg = NaN(size(S));
+    % Targets use 1y..9y
+    y_target = y_annual(:, 1:9);
+
+    % ------------------------------------------------------------
+    % slope: 2y..10y relative to 1y
+    % ------------------------------------------------------------
+    S = y_input - y_annual(:, 1);
+
+    D12M_S = NaN(size(S));
     if size(S, 1) > 12
-        S_chg(13:end, :) = S(13:end, :) - S(1:end-12, :);
+        D12M_S(13:end, :) = S(13:end, :) - S(1:end-12, :);
     end
 
+    % ------------------------------------------------------------
+    % forward: 2y..10y
+    % ------------------------------------------------------------
     n_vec = 2:10;
-    FWD   = y_annual(:, 2:end) .* n_vec - y_annual(:, 1:end-1) .* (n_vec - 1);
-    rf12  = y_annual(:, 1);
+    FWD   = y_input .* n_vec - y_annual(:, 1:9) .* (n_vec - 1);
 
-    FWD_chg = NaN(size(FWD));
+    D12M_FWD = NaN(size(FWD));
     if size(FWD, 1) > 12
-        FWD_chg(13:end, :) = FWD(13:end, :) - FWD(1:end-12, :);
+        D12M_FWD(13:end, :) = FWD(13:end, :) - FWD(1:end-12, :);
     end
 
+    % ------------------------------------------------------------
+    % 1-month yield change input for 2y..10y
+    % ------------------------------------------------------------
+    D1M_Y = NaN(size(y_input));
+    if size(y_input, 1) > 1
+        D1M_Y(2:end, :) = y_input(2:end, :) - y_input(1:end-1, :);
+    end
+
+    % ------------------------------------------------------------
+    % Expanding PCA on 12-month yield changes over m001..m120
+    % ------------------------------------------------------------
     T = size(y_120, 1);
-    DY_120 = NaN(T, 120);
+    D12M_Y_120 = NaN(T, 120);
     if T > 12
-        DY_120(13:end, :) = y_120(13:end, :) - y_120(1:end-12, :);
+        D12M_Y_120(13:end, :) = y_120(13:end, :) - y_120(1:end-12, :);
     end
 
-    DY_PC = NaN(T, 3);
+    D12M_Y_PC = NaN(T, 3);
     prev_V = [];
     min_obs_pca = 24;
 
     for t = 13:T
-        D_train = DY_120(13:t, :);
+        D_train = D12M_Y_120(13:t, :);
         ok_train = all(isfinite(D_train), 2);
         D_train = D_train(ok_train, :);
 
@@ -66,7 +89,7 @@ function build_target_and_features(in_csv, out_mat)
             continue;
         end
 
-        x_t = DY_120(t, :);
+        x_t = D12M_Y_120(t, :);
         if ~all(isfinite(x_t))
             continue;
         end
@@ -93,14 +116,70 @@ function build_target_and_features(in_csv, out_mat)
         end
 
         score_t = (x_t - mu) * V_use;
-        DY_PC(t, 1:n_keep) = score_t;
+        D12M_Y_PC(t, 1:n_keep) = score_t;
 
         prev_V = V_use;
     end
 
-    DY_PC1 = DY_PC(:, 1);
-    DY_PC2 = DY_PC(:, 2);
-    DY_PC3 = DY_PC(:, 3);
+    D12M_Y_PC1 = D12M_Y_PC(:, 1);
+    D12M_Y_PC2 = D12M_Y_PC(:, 2);
+    D12M_Y_PC3 = D12M_Y_PC(:, 3);
+
+    % ------------------------------------------------------------
+    % Expanding PCA on 12-month forward changes over fwd_2..fwd_10
+    % ------------------------------------------------------------
+    D12M_FWD_ANN = NaN(size(FWD));
+    if size(FWD, 1) > 12
+        D12M_FWD_ANN(13:end, :) = FWD(13:end, :) - FWD(1:end-12, :);
+    end
+
+    D12M_FWD_PC = NaN(T, 3);
+    prev_V_dfwd = [];
+
+    for t = 13:T
+        D_train = D12M_FWD_ANN(13:t, :);
+        ok_train = all(isfinite(D_train), 2);
+        D_train = D_train(ok_train, :);
+
+        if size(D_train, 1) < min_obs_pca
+            continue;
+        end
+
+        x_t = D12M_FWD_ANN(t, :);
+        if ~all(isfinite(x_t))
+            continue;
+        end
+
+        mu = mean(D_train, 1);
+        D_center = D_train - mu;
+
+        [~, ~, V] = svd(D_center, 'econ');
+
+        n_keep = min(3, size(V, 2));
+        if n_keep < 1
+            continue;
+        end
+
+        V_use = V(:, 1:n_keep);
+
+        if ~isempty(prev_V_dfwd)
+            n_align = min(size(prev_V_dfwd, 2), size(V_use, 2));
+            for k = 1:n_align
+                if prev_V_dfwd(:, k)' * V_use(:, k) < 0
+                    V_use(:, k) = -V_use(:, k);
+                end
+            end
+        end
+
+        score_t = (x_t - mu) * V_use;
+        D12M_FWD_PC(t, 1:n_keep) = score_t;
+
+        prev_V_dfwd = V_use;
+    end
+
+    D12M_FWD_PC1 = D12M_FWD_PC(:, 1);
+    D12M_FWD_PC2 = D12M_FWD_PC(:, 2);
+    D12M_FWD_PC3 = D12M_FWD_PC(:, 3);
 
     % ------------------------------------------------------------
     % External blocks
@@ -108,14 +187,16 @@ function build_target_and_features(in_csv, out_mat)
     T_Ext  = raw(:, ~y_mask & vn ~= "Time");
     ext_vn = string(T_Ext.Properties.VariableNames);
 
-    % keep old behavior
     is_iv      = startsWith(ext_vn, "ATM_IV_");
     is_macropc = ~cellfun('isempty', regexp(ext_vn, '^F\d+$', 'once'));
     is_macro   = ~(is_iv | is_macropc);
 
+    % ------------------------------------------------------------
+    % Target: keep existing naming rule dy_1..dy_9
+    % ------------------------------------------------------------
     DY_dec = NaN(T, 9);
     if T > 12
-        DY_dec(1:T-12, :) = y_annual(13:T, 1:9) - y_annual(1:T-12, 1:9);
+        DY_dec(1:T-12, :) = y_target(13:T, :) - y_target(1:T-12, :);
     end
     DY_pct = 100 * DY_dec;
 
@@ -127,41 +208,60 @@ function build_target_and_features(in_csv, out_mat)
 
     X.slope.Time  = Time;
     X.slope.data  = S;
-    X.slope.names = cellstr(compose('s_%d', 2:10));
+    X.slope.names = cellstr(compose('slope_%dy', 2:10));
 
-    X.slopechg.Time  = Time;
-    X.slopechg.data  = S_chg;
-    X.slopechg.names = cellstr(compose('ds_%d', 2:10));
+    X.d12m_slope.Time  = Time;
+    X.d12m_slope.data  = D12M_S;
+    X.d12m_slope.names = cellstr(compose('d12m_slope_%dy', 2:10));
 
     X.fwd.Time  = Time;
-    X.fwd.data  = [rf12, FWD];
-    X.fwd.names = cellstr(["fwd_1", compose('fwd_%d', 2:10)]);
+    X.fwd.data  = FWD;
+    X.fwd.names = cellstr(compose('fwd_%dy', 2:10));
 
-    X.fwdchg.Time  = Time;
-    X.fwdchg.data  = FWD_chg;
-    X.fwdchg.names = cellstr(compose('dfwd_%d', 2:10));
+    X.d12m_fwd.Time  = Time;
+    X.d12m_fwd.data  = D12M_FWD;
+    X.d12m_fwd.names = cellstr(compose('d12m_fwd_%dy', 2:10));
 
-    X.dy_pc.Time  = Time;
-    X.dy_pc.data  = DY_PC;
-    X.dy_pc.names = {'dy_pc_1', 'dy_pc_2', 'dy_pc_3'};
+    X.d1m_y.Time  = Time;
+    X.d1m_y.data  = D1M_Y;
+    X.d1m_y.names = cellstr(compose('d1m_y_%dy', 2:10));
 
-    X.dy_pc1.Time  = Time;
-    X.dy_pc1.data  = DY_PC1;
-    X.dy_pc1.names = {'dy_pc_1'};
+    X.d12m_y_pc.Time  = Time;
+    X.d12m_y_pc.data  = D12M_Y_PC;
+    X.d12m_y_pc.names = {'d12m_y_pc1', 'd12m_y_pc2', 'd12m_y_pc3'};
 
-    X.dy_pc2.Time  = Time;
-    X.dy_pc2.data  = DY_PC2;
-    X.dy_pc2.names = {'dy_pc_2'};
+    X.d12m_y_pc1.Time  = Time;
+    X.d12m_y_pc1.data  = D12M_Y_PC1;
+    X.d12m_y_pc1.names = {'d12m_y_pc1'};
 
-    X.dy_pc3.Time  = Time;
-    X.dy_pc3.data  = DY_PC3;
-    X.dy_pc3.names = {'dy_pc_3'};
+    X.d12m_y_pc2.Time  = Time;
+    X.d12m_y_pc2.data  = D12M_Y_PC2;
+    X.d12m_y_pc2.names = {'d12m_y_pc2'};
+
+    X.d12m_y_pc3.Time  = Time;
+    X.d12m_y_pc3.data  = D12M_Y_PC3;
+    X.d12m_y_pc3.names = {'d12m_y_pc3'};
+
+    X.d12m_fwd_pc.Time  = Time;
+    X.d12m_fwd_pc.data  = D12M_FWD_PC;
+    X.d12m_fwd_pc.names = {'d12m_fwd_pc1', 'd12m_fwd_pc2', 'd12m_fwd_pc3'};
+
+    X.d12m_fwd_pc1.Time  = Time;
+    X.d12m_fwd_pc1.data  = D12M_FWD_PC1;
+    X.d12m_fwd_pc1.names = {'d12m_fwd_pc1'};
+
+    X.d12m_fwd_pc2.Time  = Time;
+    X.d12m_fwd_pc2.data  = D12M_FWD_PC2;
+    X.d12m_fwd_pc2.names = {'d12m_fwd_pc2'};
+
+    X.d12m_fwd_pc3.Time  = Time;
+    X.d12m_fwd_pc3.data  = D12M_FWD_PC3;
+    X.d12m_fwd_pc3.names = {'d12m_fwd_pc3'};
 
     X.iv.Time  = Time;
     X.iv.data  = table2array(T_Ext(:, is_iv));
     X.iv.names = cellstr(string(T_Ext.Properties.VariableNames(is_iv)));
 
-    % keep old behavior
     X.macropc.Time  = Time;
     X.macropc.data  = table2array(T_Ext(:, is_macropc));
     X.macropc.names = cellstr(string(T_Ext.Properties.VariableNames(is_macropc)));
@@ -228,9 +328,6 @@ function build_target_and_features(in_csv, out_mat)
 
 end
 
-% ============================================================
-% helper: block creator
-% ============================================================
 function B = make_block(Time, data, names)
     B = struct();
     B.Time  = Time;
@@ -238,15 +335,10 @@ function B = make_block(Time, data, names)
     B.names = cellstr(names(:)');
 end
 
-% ============================================================
-% helper: FRED-MD group mapping
-% based on variable names in your 2025-12-MD.csv / fred_md_processed.csv
-% ============================================================
 function G = fred_md_group_definitions()
 
     G = struct();
 
-    % 1. Output / income
     G.output = string({ ...
         'RPI','W875RX1','DPCERA3M086SBEA','CMRMTSPLx','RETAILx', ...
         'INDPRO','IPFPNSS','IPFINAL','IPCONGD','IPDCONGD','IPNCONGD', ...
@@ -255,7 +347,6 @@ function G = fred_md_group_definitions()
         'DTCOLNVHFNM','DTCTHFNM','INVEST' ...
     });
 
-    % 2. Labor market
     G.labor = string({ ...
         'HWI','HWIURATIO','CLF16OV','CE16OV','UNRATE','UEMPMEAN', ...
         'UEMPLT5','UEMP5TO14','UEMP15OV','UEMP15T26','UEMP27OV','CLAIMSx', ...
@@ -265,31 +356,26 @@ function G = fred_md_group_definitions()
         'CES0600000008','CES2000000008','CES3000000008' ...
     });
 
-    % 3. Housing
     G.housing = string({ ...
         'HOUST','HOUSTNE','HOUSTMW','HOUSTS','HOUSTW', ...
         'PERMIT','PERMITNE','PERMITMW','PERMITS','PERMITW' ...
     });
 
-    % 4. Orders / inventories
     G.orders = string({ ...
         'ACOGNO','AMDMNOx','ANDENOx','AMDMUOx','BUSINVx','ISRATIOx' ...
     });
 
-    % 5. Money / credit
     G.money = string({ ...
         'M1SL','M2SL','M2REAL','BOGMBASE','TOTRESNS','NONBORRES', ...
         'BUSLOANS','REALLN','NONREVSL','CONSPI' ...
     });
 
-    % 6. Rates / FX / bond market / financial conditions
     G.ratesfx = string({ ...
         'FEDFUNDS','CP3Mx','TB3MS','TB6MS','GS1','GS5','GS10','AAA','BAA', ...
         'COMPAPFFx','TB3SMFFM','TB6SMFFM','T1YFFM','T5YFFM','T10YFFM', ...
         'AAAFFM','BAAFFM','TWEXAFEGSMTHx','EXSZUSx','EXJPUSx','EXUSUKx','EXCAUSx' ...
     });
 
-    % 7. Prices
     G.prices = string({ ...
         'WPSFD49207','WPSFD49502','WPSID61','WPSID62','OILPRICEx','PPICMM', ...
         'CPIAUCSL','CPIAPPSL','CPITRNSL','CPIMEDSL','CUSR0000SAC','CUSR0000SAD', ...
@@ -297,7 +383,6 @@ function G = fred_md_group_definitions()
         'DDURRG3M086SBEA','DNDGRG3M086SBEA','DSERRG3M086SBEA' ...
     });
 
-    % 8. Stock market / sentiment / volatility
     G.stock = string({ ...
         'S&P 500','S&P div yield','S&P PE ratio','UMCSENTx','VIXCLSx' ...
     });
