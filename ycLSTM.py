@@ -28,15 +28,15 @@ from utils import (
 
 BASE_CONFIG = {
     "mat_path": "data/target_and_features.mat",
-    "feature_groups": ["dy_pc1", "dy_pc2", "dy_pc3"],
+    "feature_groups": ["d12m_y_pc2"],
     "target_group": "dy",
     "target_indices": None,
     "horizon": 12,
     "oos_start": "1989-01-31",
     "hyper_freq": 60,
-    "nmc": 5,
+    "nmc": 10,
     "navg": 3,
-    "run_tag": "pc123_lstm",
+    "run_tag": "LSTM_pc2_ensembled",
     "model_name": "LSTMModel",
     "results_dir": "results",
     "params": {

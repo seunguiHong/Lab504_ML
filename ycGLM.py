@@ -20,12 +20,12 @@ from utils import (
 
 CONFIG = {
     "mat_path": "data/target_and_features.mat",
-    "feature_groups": ["dy_pc", "macro"],
+    "feature_groups": ["d12m_y_pc"],
     "target_group": "dy",
     "target_indices": None,
     "horizon": 12,
     "oos_start": "1989-01-31",
-    "run_tag": "pc123+macro",
+    "run_tag": "RIDGERDIGERIDGE",
     "model_name": "GLM",
     "results_dir": "results",
     "params": {

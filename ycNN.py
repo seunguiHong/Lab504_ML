@@ -27,15 +27,15 @@ from utils import (
 
 BASE_CONFIG = {
     "mat_path": "data/target_and_features.mat",
-    "feature_groups": ["dy_pc1","dy_pc2"],
+    "feature_groups": ["d12m_fwd"],
     "target_group": "dy",
     "target_indices": None,
     "horizon": 12,
     "oos_start": "1989-01-31",
     "hyper_freq": 60,
-    "nmc": 1,
-    "navg": 1,
-    "run_tag": "AAAAAAAAAAAAA",
+    "nmc": 100,
+    "navg": 10,
+    "run_tag": "nn_fwd_itself", # Be careful
     "model_func": NFB.NNModel,
     "model_name": "NNModel",
     "results_dir": "results",
