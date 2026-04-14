@@ -1,64 +1,59 @@
 clear; clc; close all;
 
-%% =========================================================================
+%% ============================================================
 % User settings
-% =========================================================================
+%% ============================================================
+res_file   = 'ridge_pc2.mat';          % ycNN / ycGLM / ycOLS result file
+dataset_file = 'dataset.csv';          % raw yield csv (percent units)
+rv_file      = 'rv_LW_monthly.xlsx';   % RV file (decimal units)
 
-target_n   = 10;                 % draws dy_{n-1} and rx^{(n)}
-res_file   = 'best.mat';         % result .mat file
-csv_file   = 'dataset.csv';      % raw yield csv
-model_name = 'NNModel';          % e.g. 'NNModel'
+target_n = 10;                         % e.g. 2,5,7,10
+gamma_list = [2, 10];
 
-if ~isscalar(target_n) || target_n ~= floor(target_n) || target_n < 2
-    error('target_n must be an integer >= 2.');
-end
+first_forecast_origin = datetime(1989,1,31);
+last_forecast_origin  = datetime(2023,12,31);
 
-dy_idx = target_n - 1;
-dy_name = "dy_" + string(dy_idx);
+h = 12;                                % 12-month horizon
+weight_bounds = [];                    % [] = unconstrained
 
-eval_start_dy = datetime(1989,12,31);
-eval_end_dy   = datetime(2024,12,31);
+% Optional:
+% Leave empty to auto-detect the unique field starting with Y_forecast_agg_
+model_field_override = "";
 
-eval_start_rx = datetime(1989,12,31);
-eval_end_rx   = datetime(2023,12,31);
-
-eh_start   = datetime(1971,8,31);
-hac_lags   = 12;
-min_obs_cs = 12;
-
-fig_main = [100, 100, 1200, 520];
-fig_sse  = [120, 140, 1200, 430];
-
-lw_true  = 2.4;
-lw_model = 1.8;
-lw_bench = 1.8;
-lw_sse   = 2.0;
-
-fs_axis   = 18;
-fs_legend = 15;
-fs_tick   = 13;
-
-%% =========================================================================
-% Load result file
-% =========================================================================
-
+%% ============================================================
+% Step 0. Load result file and detect forecast field
+%% ============================================================
 S = load(res_file);
 
-if ~isfield(S, 'Dates')
-    error('Dates is missing in result file.');
-end
-if ~isfield(S, 'Y_Columns')
-    error('Y_Columns is missing in result file.');
-end
-if ~isfield(S, 'Y_True')
-    error('Y_True is missing in result file.');
+assert(isfield(S, 'Dates'),     'Dates is missing in result file.');
+assert(isfield(S, 'Y_Columns'), 'Y_Columns is missing in result file.');
+assert(isfield(S, 'Y_True'),    'Y_True is missing in result file.');
+
+if strlength(model_field_override) > 0
+    agg_field = char(model_field_override);
+    assert(isfield(S, agg_field), 'Missing field %s in result file.', agg_field);
+else
+    fn = string(fieldnames(S));
+    agg_candidates = fn(startsWith(fn, "Y_forecast_agg_"));
+
+    if isempty(agg_candidates)
+        error('No field starting with Y_forecast_agg_ found in result file.');
+    elseif numel(agg_candidates) > 1
+        disp('Available forecast fields:');
+        disp(agg_candidates);
+        error('Multiple Y_forecast_agg_ fields found. Set model_field_override explicitly.');
+    else
+        agg_field = char(agg_candidates(1));
+    end
 end
 
-agg_field = "Y_forecast_agg_" + model_name;
-if ~isfield(S, agg_field)
-    error('Missing field %s in result file.', agg_field);
-end
+model_name = string(erase(string(agg_field), "Y_forecast_agg_"));
+fprintf('Using forecast field: %s\n', agg_field);
+fprintf('Detected model name : %s\n', model_name);
 
+%% ============================================================
+% Step 1. Parse result-file dates, columns, forecasts
+%% ============================================================
 if isdatetime(S.Dates)
     dates_res = S.Dates(:);
 elseif isstring(S.Dates)
@@ -68,7 +63,7 @@ elseif iscell(S.Dates)
 elseif ischar(S.Dates)
     dates_res = datetime(string(cellstr(S.Dates)));
 else
-    error('Unsupported Dates format.');
+    error('Unsupported Dates format in result file.');
 end
 
 if isstring(S.Y_Columns)
@@ -78,306 +73,345 @@ elseif iscell(S.Y_Columns)
 elseif ischar(S.Y_Columns)
     ycols = string(cellstr(S.Y_Columns));
 else
-    error('Unsupported Y_Columns format.');
+    error('Unsupported Y_Columns format in result file.');
 end
 
 Y_true = S.Y_True;
 Y_hat  = S.(agg_field);
 
-if size(Y_true,1) ~= numel(dates_res) || size(Y_hat,1) ~= numel(dates_res)
-    error('Dates and forecast arrays are inconsistent.');
-end
+assert(size(Y_true,1) == numel(dates_res), 'Y_True and Dates are inconsistent.');
+assert(size(Y_hat,1)  == numel(dates_res), 'Y_hat and Dates are inconsistent.');
+
+dy_idx  = target_n - 1;
+dy_name = "dy_" + string(dy_idx);
 
 j_dy = find(ycols == dy_name, 1);
 if isempty(j_dy)
     error('Missing %s in Y_Columns.', dy_name);
 end
 
-dy_true_full = Y_true(:, j_dy);
-dy_hat_full  = Y_hat(:, j_dy);
+dy_hat_full = Y_hat(:, j_dy);   % percent units
+dy_true_full = Y_true(:, j_dy); %#ok<NASGU>
 
-%% =========================================================================
-% dy_{n-1}: realized vs model-implied
-% =========================================================================
+%% ============================================================
+% Step 2. Load monthly yields from dataset.csv
+%% ============================================================
+D = readtable(dataset_file);
+D.Date = eom_from_yyyymm(D.Time);
 
-dy_rw_full = zeros(size(dy_true_full));
+col_y1   = maturity_col(12);
+col_ynm1 = maturity_col(12 * (target_n - 1));
+col_yn   = maturity_col(12 * target_n);
 
-ok = isfinite(dy_true_full) & isfinite(dy_hat_full) & isfinite(dy_rw_full);
-dates_dy = dates_res(ok);
-dy_true  = dy_true_full(ok);
-dy_hat   = dy_hat_full(ok);
-dy_rw    = dy_rw_full(ok);
+assert(ismember(col_y1,   D.Properties.VariableNames), 'Missing %s.', col_y1);
+assert(ismember(col_ynm1, D.Properties.VariableNames), 'Missing %s.', col_ynm1);
+assert(ismember(col_yn,   D.Properties.VariableNames), 'Missing %s.', col_yn);
 
-ok_eval = (dates_dy >= eval_start_dy) & (dates_dy <= eval_end_dy);
-dates_dy = dates_dy(ok_eval);
-dy_true  = dy_true(ok_eval);
-dy_hat   = dy_hat(ok_eval);
-dy_rw    = dy_rw(ok_eval);
+% Keep yields in percent units here for clean consistency with dy_hat_full.
+D.y1_pct   = D.(col_y1);
+D.ynm1_pct = D.(col_ynm1);
+D.yn_pct   = D.(col_yn);
 
-if isempty(dates_dy)
-    error('No dy observations remain in evaluation window.');
+%% ============================================================
+% Step 3. Construct realized rx, RW forecast, EH forecast
+%% ============================================================
+% Realized target with origin t:
+%   rx_t^(n) = n*y_t^(n) - (n-1)*y_{t+12}^{(n-1)} - y_t^(1)
+D.ynm1_lead_pct = [D.ynm1_pct((1+h):end); nan(h,1)];
+D.rx_realized_pct = target_n * D.yn_pct ...
+                  - (target_n - 1) * D.ynm1_lead_pct ...
+                  - D.y1_pct;
+
+% RW forecast at origin t:
+%   E_t[y_{t+12}^{(n-1)}] = y_t^{(n-1)}
+D.mu_rw_pct = target_n * D.yn_pct ...
+            - (target_n - 1) * D.ynm1_pct ...
+            - D.y1_pct;
+
+% EH forecast with strict embargo:
+% use realized returns with origin <= t-12
+D.mu_eh_pct = nan(height(D), 1);
+
+for j = 1:height(D)
+    cutoff_date = D.Date(j) - calmonths(h);
+    use_idx = (D.Date <= cutoff_date) & isfinite(D.rx_realized_pct);
+    D.mu_eh_pct(j) = mean(D.rx_realized_pct(use_idx), 'omitnan');
 end
 
-mse_dy   = mean((dy_true - dy_hat).^2);
-rmse_dy  = sqrt(mse_dy);
-mae_dy   = mean(abs(dy_true - dy_hat));
-corr_dy  = corr(dy_true, dy_hat, 'Rows', 'complete');
+%% ============================================================
+% Step 4. Align model dy forecast with raw yield panel
+%% ============================================================
+[dates_common, ia, ib] = intersect(dates_res, D.Date, 'stable');
 
-ss_res_dy = sum((dy_true - dy_hat).^2);
-ss_bmk_dy = sum(dy_true.^2);
-r2oos_dy  = 1 - ss_res_dy / ss_bmk_dy;
+dy_hat_pct = dy_hat_full(ia);
+D_common = D(ib, :);
+D_common.Date = dates_common;
 
-valid = isfinite(dy_true) & isfinite(dy_hat);
-if sum(valid) >= 2
-    yt = dy_true(valid);
-    yf = dy_hat(valid);
-    y0 = zeros(size(yt));
-    f  = (yt - y0).^2 - (yt - yf).^2 + (y0 - yf).^2;
-    Xc = ones(numel(f),1);
-    try
-        [~,~,stats] = hac(Xc, f, 'Intercept', false, 'Lags', hac_lags);
-        tval = stats.beta ./ stats.se;
-    catch
-        fit = fitlm(Xc, f, 'Intercept', false);
-        tval = fit.Coefficients.tStat(1);
+% Model-implied forecast for y_{t+12}^{(n-1)} in percent:
+%   y_{t+12|t}^{(n-1)} = y_t^{(n-1)} + \widehat{dy}_{t}^{(n-1)}
+D_common.ynm1_model_lead_pct = D_common.ynm1_pct + dy_hat_pct;
+
+% Model-implied rx forecast in percent:
+D_common.mu_model_pct = target_n * D_common.yn_pct ...
+                      - (target_n - 1) * D_common.ynm1_model_lead_pct ...
+                      - D_common.y1_pct;
+
+%% ============================================================
+% Step 5. Build common forecast-origin sample
+%% ============================================================
+valid_origin = ...
+    D_common.Date >= first_forecast_origin & ...
+    D_common.Date <= last_forecast_origin  & ...
+    isfinite(D_common.rx_realized_pct)     & ...
+    isfinite(D_common.mu_eh_pct)           & ...
+    isfinite(D_common.mu_rw_pct)           & ...
+    isfinite(D_common.mu_model_pct);
+
+F = D_common(valid_origin, { ...
+    'Date','Time', ...
+    'mu_model_pct','mu_rw_pct','mu_eh_pct','rx_realized_pct'});
+
+%% ============================================================
+% Step 6. Forecast comparison on common sample
+%% ============================================================
+F.e_model = F.rx_realized_pct - F.mu_model_pct;
+F.e_rw    = F.rx_realized_pct - F.mu_rw_pct;
+F.e_eh    = F.rx_realized_pct - F.mu_eh_pct;
+
+F.sse_model = F.e_model .^ 2;
+F.sse_rw    = F.e_rw    .^ 2;
+F.sse_eh    = F.e_eh    .^ 2;
+
+R2_model_vs_eh = 1 - sum(F.sse_model, 'omitnan') / sum(F.sse_eh, 'omitnan');
+R2_rw_vs_eh    = 1 - sum(F.sse_rw,    'omitnan') / sum(F.sse_eh, 'omitnan');
+
+F.delta_sse_model_eh = F.sse_eh - F.sse_model;
+F.delta_sse_rw_eh    = F.sse_eh - F.sse_rw;
+
+F.cum_delta_sse_model_eh = cumsum(F.delta_sse_model_eh);
+F.cum_delta_sse_rw_eh    = cumsum(F.delta_sse_rw_eh);
+
+rx_bar_pct = mean(F.rx_realized_pct, 'omitnan');
+sse_denom  = sum((F.rx_realized_pct - rx_bar_pct).^2, 'omitnan');
+
+F.cum_delta_sse_model_eh_norm = F.cum_delta_sse_model_eh / sse_denom;
+F.cum_delta_sse_rw_eh_norm    = F.cum_delta_sse_rw_eh    / sse_denom;
+
+%% ============================================================
+% Step 7. Load RV and build sigma^2
+%% ============================================================
+RV = readtable(rv_file);
+
+if ~isdatetime(RV.Date)
+    RV.Date = datetime(string(RV.Date), 'InputFormat', 'yyyy-MM-dd');
+end
+
+rv_col = maturity_col(12 * (target_n - 1));
+assert(ismember(rv_col, RV.Properties.VariableNames), 'Missing %s in RV file.', rv_col);
+
+RV.rv_nminus1 = RV.(rv_col);                  % decimal units
+RV.sigma2     = (target_n - 1)^2 * (RV.rv_nminus1 .^ 2);
+
+RV = RV(:, {'Date','Time','rv_nminus1','sigma2'});
+
+%% ============================================================
+% Step 8. Merge forecast sample with RV for CER
+%% ============================================================
+Tcer = innerjoin( ...
+    F(:, {'Date','Time','mu_model_pct','mu_rw_pct','mu_eh_pct','rx_realized_pct'}), ...
+    RV, ...
+    'Keys', {'Date','Time'} ...
+);
+
+valid_cer = ...
+    isfinite(Tcer.mu_model_pct)    & ...
+    isfinite(Tcer.mu_rw_pct)       & ...
+    isfinite(Tcer.mu_eh_pct)       & ...
+    isfinite(Tcer.rx_realized_pct) & ...
+    isfinite(Tcer.sigma2);
+
+Tcer = Tcer(valid_cer, :);
+
+% Convert rx forecasts/realizations from percent to decimals for CER
+Tcer.mu_model = Tcer.mu_model_pct / 100;
+Tcer.mu_rw    = Tcer.mu_rw_pct    / 100;
+Tcer.mu_eh    = Tcer.mu_eh_pct    / 100;
+Tcer.rx_realized = Tcer.rx_realized_pct / 100;
+
+%% ============================================================
+% Step 9. Compute CER paths for each gamma
+%% ============================================================
+results = struct();
+
+for g = 1:numel(gamma_list)
+    gamma = gamma_list(g);
+    G = Tcer;
+
+    % Optimal weights
+    G.w_model = (G.mu_model + 0.5 * G.sigma2) ./ (gamma * G.sigma2);
+    G.w_rw    = (G.mu_rw    + 0.5 * G.sigma2) ./ (gamma * G.sigma2);
+    G.w_eh    = (G.mu_eh    + 0.5 * G.sigma2) ./ (gamma * G.sigma2);
+
+    if ~isempty(weight_bounds)
+        G.w_model = min(max(G.w_model, weight_bounds(1)), weight_bounds(2));
+        G.w_rw    = min(max(G.w_rw,    weight_bounds(1)), weight_bounds(2));
+        G.w_eh    = min(max(G.w_eh,    weight_bounds(1)), weight_bounds(2));
     end
-    pval_dy = 1 - tcdf(tval, numel(f) - 1);
-else
-    pval_dy = NaN;
+
+    % Period-by-period realized CER
+    G.u_model = (G.rx_realized + 0.5 * G.sigma2) .* G.w_model ...
+              - 0.5 * gamma * G.sigma2 .* (G.w_model .^ 2);
+
+    G.u_rw    = (G.rx_realized + 0.5 * G.sigma2) .* G.w_rw ...
+              - 0.5 * gamma * G.sigma2 .* (G.w_rw .^ 2);
+
+    G.u_eh    = (G.rx_realized + 0.5 * G.sigma2) .* G.w_eh ...
+              - 0.5 * gamma * G.sigma2 .* (G.w_eh .^ 2);
+
+    % Utility gains
+    G.du_model_rw = G.u_model - G.u_rw;
+    G.du_model_eh = G.u_model - G.u_eh;
+    G.du_rw_eh    = G.u_rw    - G.u_eh;
+
+    % Cumulative paths
+    G.cu_model = cumsum(G.u_model);
+    G.cu_rw    = cumsum(G.u_rw);
+    G.cu_eh    = cumsum(G.u_eh);
+
+    G.cu_gain_model_rw = cumsum(G.du_model_rw);
+    G.cu_gain_model_eh = cumsum(G.du_model_eh);
+    G.cu_gain_rw_eh    = cumsum(G.du_rw_eh);
+
+    fld = sprintf('gamma_%d', gamma);
+    results.(fld) = G;
 end
 
-sq_err_model = (dy_true - dy_hat).^2;
-sq_err_zero  = dy_true.^2;
-scale_den = (numel(dy_true) - 1) * var(dy_true, 0);
-cum_sse_diff = cumsum((sq_err_zero - sq_err_model) / scale_den);
+%% ============================================================
+% Step 10. Summary table
+%% ============================================================
+summary_tbl = table();
+summary_tbl.gamma = gamma_list(:);
 
-fprintf('\n');
-fprintf('dy summary\n');
-fprintf('Target     : %s\n', dy_name);
-fprintf('N          : %d\n', numel(dy_true));
-fprintf('MSE        : %.6f\n', mse_dy);
-fprintf('RMSE       : %.6f\n', rmse_dy);
-fprintf('MAE        : %.6f\n', mae_dy);
-fprintf('Corr       : %.6f\n', corr_dy);
-fprintf('R2OOS      : %.6f\n', r2oos_dy);
-fprintf('p-value    : %.6f\n', pval_dy);
+avg_u_model = nan(numel(gamma_list),1);
+avg_u_rw    = nan(numel(gamma_list),1);
+avg_u_eh    = nan(numel(gamma_list),1);
 
-dy_label = sprintf('$\\Delta y^{(%d)}$', dy_idx);
+cum_u_model = nan(numel(gamma_list),1);
+cum_u_rw    = nan(numel(gamma_list),1);
+cum_u_eh    = nan(numel(gamma_list),1);
 
-figure('Color','w','Position',fig_main);
-plot(dates_dy, dy_true, '--', 'LineWidth', lw_true); hold on;
-plot(dates_dy, dy_hat,  '-',  'LineWidth', lw_model);
-plot(dates_dy, dy_rw,   '-',  'LineWidth', lw_bench);
+for g = 1:numel(gamma_list)
+    fld = sprintf('gamma_%d', gamma_list(g));
+    G = results.(fld);
 
-recessionplot('axes', gca);
-uistack(findobj(gca,'Tag','recessionbars'),'bottom');
+    avg_u_model(g) = mean(G.u_model, 'omitnan');
+    avg_u_rw(g)    = mean(G.u_rw,    'omitnan');
+    avg_u_eh(g)    = mean(G.u_eh,    'omitnan');
 
-grid on; box on;
-ax = gca; ax.FontSize = fs_tick; ax.LineWidth = 1.1;
-xlim([dates_dy(1), dates_dy(end)]);
-xlabel('Date', 'FontSize', fs_axis, 'FontWeight', 'bold');
-ylabel(dy_label, 'Interpreter', 'latex', 'FontSize', fs_axis, 'FontWeight', 'bold');
-
-lgd = legend("Realized", "Model-implied", "RW (0)", 'Location', 'best');
-lgd.FontSize = fs_legend;
-lgd.Box = 'off';
-
-figure('Color','w','Position',fig_sse);
-plot(dates_dy, cum_sse_diff, '-', 'LineWidth', lw_sse); hold on;
-yline(0, '--');
-
-recessionplot('axes', gca);
-uistack(findobj(gca,'Tag','recessionbars'),'bottom');
-
-grid on; box on;
-ax = gca; ax.FontSize = fs_tick; ax.LineWidth = 1.1;
-xlim([dates_dy(1), dates_dy(end)]);
-xlabel('Date', 'FontSize', fs_axis, 'FontWeight', 'bold');
-ylabel('Cumulative SSE difference', 'FontSize', fs_axis, 'FontWeight', 'bold');
-
-%% =========================================================================
-% rx^{(n)} reconstruction
-% =========================================================================
-
-TBL = readtable(csv_file);
-
-m_prev = sprintf('m%03d', 12 * (target_n - 1));
-m_curr = sprintf('m%03d', 12 * target_n);
-req = {'Time', 'm012', m_prev, m_curr};
-
-if ~all(ismember(req, TBL.Properties.VariableNames))
-    error('CSV must contain %s.', strjoin(req, ', '));
+    cum_u_model(g) = G.cu_model(end);
+    cum_u_rw(g)    = G.cu_rw(end);
+    cum_u_eh(g)    = G.cu_eh(end);
 end
 
-dates_csv = datetime(string(TBL.Time), 'InputFormat', 'yyyyMM') + calmonths(1) - days(1);
-y1_full   = TBL.m012(:);
-y_nm1_full = TBL.(m_prev)(:);
-y_n_full   = TBL.(m_curr)(:);
+summary_tbl.avg_u_model = avg_u_model;
+summary_tbl.avg_u_rw    = avg_u_rw;
+summary_tbl.avg_u_eh    = avg_u_eh;
+summary_tbl.cum_u_model = cum_u_model;
+summary_tbl.cum_u_rw    = cum_u_rw;
+summary_tbl.cum_u_eh    = cum_u_eh;
 
-y_nm1_tp12_full = [y_nm1_full(13:end); NaN(12,1)];
-rx_true_full = target_n .* y_n_full - (target_n - 1) .* y_nm1_tp12_full - y1_full;
+disp('Summary table:');
+disp(summary_tbl);
 
-rx_eh_full = NaN(size(rx_true_full));
-eh_start_idx = find(dates_csv == eh_start, 1, 'first');
-if isempty(eh_start_idx)
-    error('EH start date is not found in csv_file.');
+fprintf('\nForecast R2 versus EH benchmark:\n');
+fprintf('MODEL vs EH: %.6f\n', R2_model_vs_eh);
+fprintf('RW    vs EH: %.6f\n', R2_rw_vs_eh);
+
+%% ============================================================
+% Step 11. Figures
+%% ============================================================
+assert(isfield(results, 'gamma_2'),  'results.gamma_2 is missing.');
+assert(isfield(results, 'gamma_10'), 'results.gamma_10 is missing.');
+
+G2  = results.gamma_2;
+G10 = results.gamma_10;
+
+% CER across time: gamma = 2
+figure('Color','w','Name',sprintf('CER across time, gamma=%d', 2));
+plot(G2.Date, G2.u_model, 'LineWidth', 1.8); hold on;
+plot(G2.Date, G2.u_rw,    'LineWidth', 1.8);
+plot(G2.Date, G2.u_eh,    'LineWidth', 1.5);
+yline(0, 'k-');
+grid on;
+legend({sprintf('CER^{%s}', model_name), 'CER^{RW}', 'CER^{EH}'}, 'Location', 'best');
+xlabel('Date', 'FontSize', 16);
+ylabel('CER', 'FontSize', 16);
+set(gca, 'FontSize', 14);
+
+% CER across time: gamma = 10
+figure('Color','w','Name',sprintf('CER across time, gamma=%d', 10));
+plot(G10.Date, G10.u_model, 'LineWidth', 1.8); hold on;
+plot(G10.Date, G10.u_rw,    'LineWidth', 1.8);
+plot(G10.Date, G10.u_eh,    'LineWidth', 1.5);
+yline(0, 'k-');
+grid on;
+legend({sprintf('CER^{%s}', model_name), 'CER^{RW}', 'CER^{EH}'}, 'Location', 'best');
+xlabel('Date', 'FontSize', 16);
+ylabel('CER', 'FontSize', 16);
+set(gca, 'FontSize', 14);
+
+% Cumulative CER: gamma = 2 and 10
+figure('Color','w','Name',sprintf('Cumulative CER, n=%d', target_n));
+plot(G2.Date,  G2.cu_model, '-',  'LineWidth', 1.8); hold on;
+plot(G2.Date,  G2.cu_rw,    '-',  'LineWidth', 1.8);
+plot(G2.Date,  G2.cu_eh,    '--', 'LineWidth', 1.5);
+plot(G10.Date, G10.cu_model,'-',  'LineWidth', 1.8);
+plot(G10.Date, G10.cu_rw,   '-',  'LineWidth', 1.8);
+plot(G10.Date, G10.cu_eh,   '--', 'LineWidth', 1.5);
+yline(0, 'k-');
+grid on;
+legend( ...
+    {sprintf('%s, \\gamma=2', model_name), 'RW, \gamma=2', 'EH, \gamma=2', ...
+     sprintf('%s, \\gamma=10', model_name), 'RW, \gamma=10', 'EH, \gamma=10'}, ...
+    'Location', 'best');
+xlabel('Date', 'FontSize', 16);
+ylabel('Cumulative CER', 'FontSize', 16);
+set(gca, 'FontSize', 14);
+
+% Normalized cumulative SSE difference vs EH
+figure('Color','w','Name','Normalized cumulative SSE difference vs EH');
+plot(F.Date, F.cum_delta_sse_model_eh_norm, 'LineWidth', 1.8); hold on;
+plot(F.Date, F.cum_delta_sse_rw_eh_norm,    'LineWidth', 1.8);
+yline(0, 'k-');
+grid on;
+legend({sprintf('%s - EH', model_name), 'RW - EH'}, 'Location', 'best');
+xlabel('Date', 'FontSize', 16);
+ylabel('Normalized cumulative SSE difference', 'FontSize', 16);
+set(gca, 'FontSize', 14);
+
+%% ============================================================
+% Step 12. Save output
+%% ============================================================
+out_file = sprintf('cer_%s_vs_rw_eh_n%d.mat', char(model_name), target_n);
+save(out_file, ...
+    'F', 'Tcer', 'results', 'summary_tbl', ...
+    'target_n', 'gamma_list', ...
+    'first_forecast_origin', 'last_forecast_origin', ...
+    'R2_model_vs_eh', 'R2_rw_vs_eh', ...
+    'weight_bounds', 'res_file', 'agg_field');
+
+fprintf('Saved output: %s\n', out_file);
+
+%% ============================================================
+% Local functions
+%% ============================================================
+function dt = eom_from_yyyymm(yyyymm)
+    y = floor(double(yyyymm) / 100);
+    m = mod(double(yyyymm), 100);
+    dt = datetime(y, m, 1);
+    dt = dateshift(dt, 'end', 'month');
 end
 
-for t = (eh_start_idx + 1):numel(rx_true_full)
-    hist_sample = rx_true_full(eh_start_idx:t-1);
-    rx_eh_full(t) = mean(hist_sample, 'omitnan');
+function name = maturity_col(months)
+    name = sprintf('m%03d', months);
 end
-
-[dates_rx, ia, ib] = intersect(dates_res, dates_csv, 'stable');
-
-dy_hat_match = dy_hat_full(ia);
-y1   = y1_full(ib);
-y_nm1 = y_nm1_full(ib);
-y_n   = y_n_full(ib);
-rx_true = rx_true_full(ib);
-rx_eh   = rx_eh_full(ib);
-
-y_nm1_hat_tp12 = y_nm1 + dy_hat_match;
-rx_model = target_n .* y_n - (target_n - 1) .* y_nm1_hat_tp12 - y1;
-rx_rw    = target_n .* y_n - (target_n - 1) .* y_nm1 - y1;
-
-slope_n = y_n - y1;
-T = numel(rx_true);
-rx_cs = NaN(T,1);
-
-for t = 1:T
-    train_end = t - hac_lags;
-    if train_end < 2
-        continue;
-    end
-
-    y_reg = rx_true(1:train_end);
-    x_reg = slope_n(1:train_end);
-
-    ok = isfinite(y_reg) & isfinite(x_reg);
-    if sum(ok) < min_obs_cs
-        continue;
-    end
-
-    Xreg = [ones(sum(ok),1), x_reg(ok)];
-    b = Xreg \ y_reg(ok);
-
-    if isfinite(slope_n(t))
-        rx_cs(t) = [1, slope_n(t)] * b;
-    end
-end
-
-ok = isfinite(rx_true) & isfinite(rx_model) & isfinite(rx_rw) & isfinite(rx_cs) & isfinite(rx_eh);
-dates_rx = dates_rx(ok);
-rx_true  = rx_true(ok);
-rx_model = rx_model(ok);
-rx_rw    = rx_rw(ok);
-rx_cs    = rx_cs(ok);
-rx_eh    = rx_eh(ok);
-
-ok_eval = (dates_rx >= eval_start_rx) & (dates_rx <= eval_end_rx);
-dates_rx = dates_rx(ok_eval);
-rx_true  = rx_true(ok_eval);
-rx_model = rx_model(ok_eval);
-rx_rw    = rx_rw(ok_eval);
-rx_cs    = rx_cs(ok_eval);
-rx_eh    = rx_eh(ok_eval);
-
-if isempty(dates_rx)
-    error('No rx observations remain in evaluation window.');
-end
-
-ss_eh = sum((rx_true - rx_eh).^2);
-
-r2_model = 1 - sum((rx_true - rx_model).^2) / ss_eh;
-r2_rw    = 1 - sum((rx_true - rx_rw   ).^2) / ss_eh;
-r2_cs    = 1 - sum((rx_true - rx_cs   ).^2) / ss_eh;
-r2_eh    = 1 - sum((rx_true - rx_eh   ).^2) / ss_eh;
-
-cases = {'MODEL','RW','CS'};
-yhats = {rx_model, rx_rw, rx_cs};
-pvals = NaN(3,1);
-
-for i = 1:3
-    valid = isfinite(rx_true) & isfinite(yhats{i}) & isfinite(rx_eh);
-    if sum(valid) >= 2
-        yt = rx_true(valid);
-        yf = yhats{i}(valid);
-        y0 = rx_eh(valid);
-        f  = (yt - y0).^2 - (yt - yf).^2 + (y0 - yf).^2;
-        Xc = ones(numel(f),1);
-        try
-            [~,~,stats] = hac(Xc, f, 'Intercept', false, 'Lags', hac_lags);
-            tval = stats.beta ./ stats.se;
-        catch
-            fit = fitlm(Xc, f, 'Intercept', false);
-            tval = fit.Coefficients.tStat(1);
-        end
-        pvals(i) = 1 - tcdf(tval, numel(f) - 1);
-    end
-end
-
-fprintf('\n');
-fprintf('rx summary\n');
-fprintf('Target     : rx^(%d)\n', target_n);
-fprintf('R2 MODEL   : %.6f\n', r2_model);
-fprintf('R2 RW      : %.6f\n', r2_rw);
-fprintf('R2 CS      : %.6f\n', r2_cs);
-fprintf('R2 EH      : %.6f\n', r2_eh);
-fprintf('p MODEL    : %.6f\n', pvals(1));
-fprintf('p RW       : %.6f\n', pvals(2));
-fprintf('p CS       : %.6f\n', pvals(3));
-
-figure('Color','w','Position',fig_main);
-plot(dates_rx, rx_true,  '--', 'LineWidth', lw_true); hold on;
-plot(dates_rx, rx_model, '-',  'LineWidth', lw_model);
-plot(dates_rx, rx_rw,    '-',  'LineWidth', lw_bench);
-plot(dates_rx, rx_cs,    '-',  'LineWidth', lw_bench);
-plot(dates_rx, rx_eh,    '--', 'LineWidth', lw_bench);
-
-recessionplot('axes', gca);
-uistack(findobj(gca,'Tag','recessionbars'),'bottom');
-
-grid on; box on;
-ax = gca; ax.FontSize = fs_tick; ax.LineWidth = 1.1;
-xlim([dates_rx(1), dates_rx(end)]);
-xlabel('Date', 'FontSize', fs_axis, 'FontWeight', 'bold');
-ylabel(sprintf('Realized %dY Excess Return', target_n), ...
-    'FontSize', fs_axis, 'FontWeight', 'bold');
-
-lgd = legend("True", "MODEL", "RW", "CS", "EH", 'Location', 'best');
-lgd.FontSize = fs_legend;
-lgd.Box = 'off';
-
-%% =========================================================================
-% Output struct for analysis
-% =========================================================================
-
-out = struct();
-
-out.target_n = target_n;
-out.dy_name = dy_name;
-
-out.dy_dates = dates_dy;
-out.dy_true  = dy_true;
-out.dy_hat   = dy_hat;
-out.dy_rw    = dy_rw;
-out.dy_cum_sse_diff = cum_sse_diff;
-out.dy_r2oos = r2oos_dy;
-out.dy_pval  = pval_dy;
-
-out.rx_dates = dates_rx;
-out.rx_true  = rx_true;
-out.rx_model = rx_model;
-out.rx_rw    = rx_rw;
-out.rx_cs    = rx_cs;
-out.rx_eh    = rx_eh;
-
-out.rx_r2_model = r2_model;
-out.rx_r2_rw    = r2_rw;
-out.rx_r2_cs    = r2_cs;
-out.rx_r2_eh    = r2_eh;
-
-out.rx_p_model = pvals(1);
-out.rx_p_rw    = pvals(2);
-out.rx_p_cs    = pvals(3);

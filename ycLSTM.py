@@ -36,7 +36,7 @@ BASE_CONFIG = {
     "hyper_freq": 60,
     "nmc": 10,
     "navg": 3,
-    "run_tag": "LSTM_pc2_ensembled",
+    "run_tag": "LSTM_fwd_ensembled",
     "model_name": "LSTMModel",
     "results_dir": "results",
     "params": {

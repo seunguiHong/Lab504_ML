@@ -27,7 +27,7 @@ from utils import (
 
 BASE_CONFIG = {
     "mat_path": "data/target_and_features.mat",
-    "feature_groups": ["d12m_fwd"],
+    "feature_groups": ["d12m_fwd_pc"],
     "target_group": "dy",
     "target_indices": None,
     "horizon": 12,
@@ -35,7 +35,7 @@ BASE_CONFIG = {
     "hyper_freq": 60,
     "nmc": 100,
     "navg": 10,
-    "run_tag": "nn_fwd_itself", # Be careful
+    "run_tag": "nn_fwd_pc_all_itself", # Be careful
     "model_func": NFB.NNModel,
     "model_name": "NNModel",
     "results_dir": "results",

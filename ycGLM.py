@@ -20,7 +20,7 @@ from utils import (
 
 CONFIG = {
     "mat_path": "data/target_and_features.mat",
-    "feature_groups": ["d12m_y_pc"],
+    "feature_groups": ["d12m_fwd"],
     "target_group": "dy",
     "target_indices": None,
     "horizon": 12,
