@@ -8,7 +8,6 @@ os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
 import copy
 import json
-import multiprocessing as mp
 
 import numpy as np
 import pandas as pd
@@ -19,30 +18,40 @@ from utils import (
     make_dump_dir,
     safe_rmtree,
     load_dataset,
+    enumerate_oos_forecast_indices,
+    compute_training_end_index,
+    run_seed_ensemble,
+    build_dropout_l1l2_candidates,
+    extract_seed_forecasts,
+    extract_seed_validation_losses,
+    top_validation_seed_mean,
     summarize_oos_metrics,
     build_save_dict,
-    result_name,
     save_results_mat,
 )
 
-BASE_CONFIG = {
-    "mat_path": "data/target_and_features.mat",
-    "feature_groups": ["d12m_fwd_pc"],
+
+CONFIG = {
+    "data_path": "data/target_and_features.mat",
+    "feature_groups": ["d12m_y_pc2"],
     "target_group": "dy",
     "target_indices": None,
+
     "horizon": 12,
     "oos_start": "1989-01-31",
     "hyper_freq": 60,
+
     "nmc": 100,
     "navg": 10,
-    "run_tag": "nn_fwd_pc_all_itself", # Be careful
+    "run_tag": "pc2_only",
+    "out_file": "results/ycNN_pc2_only.mat",
+
     "model_func": NFB.NNModel,
-    "model_name": "NNModel",
-    "results_dir": "results",
+
     "params": {
-        "archi": [3.3],
+        "archi": [3],
         "Dropout": [0.0],
-        "l1l2": [0.00],
+        "l1l2": [0.0],
         "learning_rate": 0.02,
         "decay_rate": 0.001,
         "momentum": 0.9,
@@ -52,32 +61,31 @@ BASE_CONFIG = {
         "batch_size": 32,
         "validation_split": 0.15,
         "shuffle": False,
-        "loss_name": "MSE",
+        "loss_name": "mse",
         "huber_delta": 1.0,
     },
 }
 
 
-def build_model_input(X, Y, forecast_index, horizon):
-    """
-    Build the input expected by NNFuncBib.NNModel.
+def build_nn_input(X, Y, forecast_idx, horizon):
+    train_end = compute_training_end_index(forecast_idx, horizon)
 
-    By convention, the last row is the forecast row.
-    Training data can only use information up to forecast_index - horizon.
-    """
-    X = np.asarray(X, dtype=float)
-    Y = np.asarray(Y, dtype=float)
-
-    train_end = int(forecast_index - horizon)
     if train_end < 1:
         return None, None
 
-    X_train = X[: train_end + 1, :]
-    Y_train = Y[: train_end + 1, :]
-    X_test = X[forecast_index : forecast_index + 1, :]
-    Y_test = Y[forecast_index : forecast_index + 1, :]
+    X_train = X[: train_end + 1]
+    Y_train = Y[: train_end + 1]
+    X_test = X[forecast_idx : forecast_idx + 1]
+    Y_test = Y[forecast_idx : forecast_idx + 1]
 
-    if X_test.shape[0] != 1 or Y_test.shape[0] != 1:
+    if not np.all(np.isfinite(X_test)):
+        return None, None
+
+    ok = np.all(np.isfinite(X_train), axis=1) & np.all(np.isfinite(Y_train), axis=1)
+    X_train = X_train[ok]
+    Y_train = Y_train[ok]
+
+    if X_train.shape[0] < 30:
         return None, None
 
     X_model = np.vstack([X_train, X_test])
@@ -86,267 +94,229 @@ def build_model_input(X, Y, forecast_index, horizon):
     return X_model, Y_model
 
 
-def _worker_run_one_seed(args):
-    model_func, seed_no, X_model, Y_model, params, refit, dumploc = args
-    return model_func(
-        X=X_model,
-        Y=Y_model,
-        no=seed_no,
+def fit_candidate(X_model, Y_model, cfg, params, dumploc, ncpus, refit):
+    outputs = run_seed_ensemble(
+        model_func=cfg["model_func"],
+        ncpus=ncpus,
+        nmc=cfg["nmc"],
+        X_model=X_model,
+        Y_model=Y_model,
         params=params,
-        refit=refit,
         dumploc=dumploc,
+        refit=refit,
     )
 
+    val_loss = extract_seed_validation_losses(outputs, cfg["nmc"])
+    score = float(np.nanmean(val_loss))
 
-def run_parallel_seeds(model_func, ncpus, nmc, X_model, Y_model, params, refit, dumploc):
-    """
-    Run multiple seeds in parallel and return a dict:
-        outputs[k] = (y_pred, val_loss)
-    """
-    jobs = [
-        (model_func, k, X_model, Y_model, params, refit, dumploc)
-        for k in range(int(nmc))
-    ]
-
-    use_ncpus = min(int(ncpus), int(nmc))
-    if use_ncpus <= 1:
-        results = [_worker_run_one_seed(job) for job in jobs]
-    else:
-        ctx = mp.get_context("spawn")
-        with ctx.Pool(processes=use_ncpus) as pool:
-            results = pool.map(_worker_run_one_seed, jobs)
-
-    return {k: results[k] for k in range(int(nmc))}
+    return outputs, score
 
 
-def _normalize_l1l2(x):
-    arr = np.asarray(x, dtype=float).ravel()
-    if arr.size == 0:
-        return [0.0, 0.0]
-    if arr.size == 1:
-        return [float(arr[0]), float(arr[0])]
-    return [float(arr[0]), float(arr[1])]
-
-
-def _build_inner_candidates(params):
-    dropout_raw = params["Dropout"]
-    l1l2_raw = params["l1l2"]
-
-    if np.isscalar(dropout_raw):
-        dropout_candidates = [float(dropout_raw)]
-    else:
-        dropout_candidates = [float(v) for v in np.asarray(dropout_raw, dtype=float).ravel()]
-
-    l1l2_arr = np.asarray(l1l2_raw, dtype=float)
-    if l1l2_arr.ndim == 1:
-        l1l2_candidates = [_normalize_l1l2(l1l2_arr)]
-    else:
-        l1l2_candidates = [_normalize_l1l2(row) for row in l1l2_arr]
-
-    candidates = []
-    for do in dropout_candidates:
-        for reg in l1l2_candidates:
-            cand = copy.deepcopy(params)
-            cand["Dropout"] = float(do)
-            cand["l1l2"] = reg
-            candidates.append(cand)
-
-    return candidates
-
-
-def _select_best_candidate(X_model, Y_model, cfg, dumploc, ncpus, refit):
-    candidates = _build_inner_candidates(cfg["params"])
-
+def select_candidate(X_model, Y_model, cfg, dumploc, ncpus, refit):
     best_outputs = None
     best_params = None
     best_score = np.inf
 
-    for cand_params in candidates:
-        outputs = run_parallel_seeds(
-            model_func=cfg["model_func"],
-            ncpus=ncpus,
-            nmc=int(cfg["nmc"]),
+    for params in build_dropout_l1l2_candidates(cfg["params"]):
+        outputs, score = fit_candidate(
             X_model=X_model,
             Y_model=Y_model,
-            params=cand_params,
-            refit=refit,
+            cfg=cfg,
+            params=params,
             dumploc=dumploc,
+            ncpus=ncpus,
+            refit=refit,
         )
 
-        val_vec = np.array([outputs[k][1] for k in range(int(cfg["nmc"]))], dtype=float)
-        score = float(np.nanmean(val_vec))
-
         if score < best_score:
-            best_score = score
             best_outputs = outputs
-            best_params = cand_params
+            best_params = copy.deepcopy(params)
+            best_score = score
 
     return best_outputs, best_params, best_score
 
 
+def compute_refit_flag(oos_count, hyper_freq, prev_best_val, best_val_since_refit):
+    if oos_count == 1:
+        return True
+
+    if oos_count % hyper_freq == 0:
+        return bool(np.isfinite(prev_best_val) and prev_best_val > best_val_since_refit)
+
+    return False
+
+
 def run_oos_forecast(X, Y, dates, cfg, dumploc, ncpus):
-    model_name = cfg["model_name"]
-
     dates = pd.DatetimeIndex(dates)
-    start_candidates = np.where(dates >= pd.Timestamp(cfg["oos_start"]))[0]
-    if start_candidates.size == 0:
-        raise ValueError("No available sample date on or after oos_start.")
-
-    first_oos_idx = int(start_candidates[0])
-    oos_indices = list(range(first_oos_idx, X.shape[0]))
+    oos_indices = enumerate_oos_forecast_indices(dates, cfg["oos_start"])
 
     T, M = Y.shape
     nmc = int(cfg["nmc"])
     navg = int(cfg["navg"])
+    horizon = int(cfg["horizon"])
     hyper_freq = int(cfg["hyper_freq"])
 
+    if navg > nmc:
+        raise ValueError("navg cannot exceed nmc.")
+
+    Y_forecast = np.full((T, M), np.nan)
     Y_forecast_all = np.full((T, nmc, M), np.nan)
-    Y_forecast_avg = np.full((T, M), np.nan)
     val_loss = np.full((T, nmc), np.nan)
 
-    best_dropout_path = np.full(T, np.nan)
-    best_l1_path = np.full(T, np.nan)
-    best_l2_path = np.full(T, np.nan)
+    current_params = None
+    current_score = np.nan
 
-    current_best_params = None
-    current_best_score = np.nan
-
-    print(model_name)
-
-    oos_counter = 0
+    oos_count = 0
     total_oos = len(oos_indices)
 
-    for j, forecast_index in enumerate(oos_indices, start=1):
-        X_model, Y_model = build_model_input(
+    prev_best_val = np.nan
+    best_val_since_refit = np.inf
+
+    print(f"Total OOS steps: {total_oos}")
+
+    for step, forecast_idx in enumerate(oos_indices, start=1):
+        X_model, Y_model = build_nn_input(
             X=X,
             Y=Y,
-            forecast_index=forecast_index,
-            horizon=int(cfg["horizon"]),
+            forecast_idx=forecast_idx,
+            horizon=horizon,
         )
-        if X_model is None or Y_model is None:
+
+        if X_model is None:
             continue
 
-        oos_counter += 1
-        retune = (oos_counter == 1) or ((oos_counter - 1) % hyper_freq == 0)
+        oos_count += 1
+
+        retune = (oos_count == 1) or (oos_count % hyper_freq == 0)
+        refit = compute_refit_flag(
+            oos_count=oos_count,
+            hyper_freq=hyper_freq,
+            prev_best_val=prev_best_val,
+            best_val_since_refit=best_val_since_refit,
+        )
 
         if retune:
-            outputs, current_best_params, current_best_score = _select_best_candidate(
+            outputs, current_params, current_score = select_candidate(
                 X_model=X_model,
                 Y_model=Y_model,
                 cfg=cfg,
                 dumploc=dumploc,
                 ncpus=ncpus,
-                refit=True,
+                refit=refit,
             )
         else:
-            outputs = run_parallel_seeds(
-                model_func=cfg["model_func"],
-                ncpus=ncpus,
-                nmc=nmc,
+            outputs, current_score = fit_candidate(
                 X_model=X_model,
                 Y_model=Y_model,
-                params=current_best_params,
-                refit=False,
+                cfg=cfg,
+                params=current_params,
                 dumploc=dumploc,
+                ncpus=ncpus,
+                refit=refit,
             )
 
-        val_loss[forecast_index, :] = np.array(
-            [outputs[k][1] for k in range(nmc)],
-            dtype=float,
+        seed_forecasts = extract_seed_forecasts(outputs, nmc)
+        seed_val_loss = extract_seed_validation_losses(outputs, nmc)
+
+        Y_forecast_all[forecast_idx] = seed_forecasts
+        Y_forecast[forecast_idx] = top_validation_seed_mean(
+            seed_forecasts=seed_forecasts,
+            seed_val_loss=seed_val_loss,
+            navg=navg,
         )
+        val_loss[forecast_idx] = seed_val_loss
 
-        pred_list = []
-        for k in range(nmc):
-            pred_k = np.asarray(outputs[k][0], dtype=float)
-            if pred_k.ndim == 1:
-                pred_k = pred_k.reshape(1, -1)
-            pred_list.append(pred_k)
+        current_best_val = float(np.nanmin(seed_val_loss))
 
-        Y_forecast_all[forecast_index, :, :] = np.concatenate(pred_list, axis=0)
+        if refit:
+            best_val_since_refit = current_best_val
+        else:
+            best_val_since_refit = min(best_val_since_refit, current_best_val)
 
-        best_seed_order = np.argsort(val_loss[forecast_index, :])
-        Y_forecast_avg[forecast_index, :] = np.mean(
-            Y_forecast_all[forecast_index, best_seed_order[:navg], :],
-            axis=0,
-        )
+        prev_best_val = current_best_val
 
-        reg_arr = np.asarray(current_best_params["l1l2"], dtype=float).ravel()
-        best_dropout_path[forecast_index] = float(current_best_params["Dropout"])
-        best_l1_path[forecast_index] = float(reg_arr[0])
-        best_l2_path[forecast_index] = float(reg_arr[1] if reg_arr.size >= 2 else reg_arr[0])
+        if step == 1 or step % 12 == 0 or step == total_oos:
+            r2_now = summarize_oos_metrics(
+                Y_true=Y,
+                Y_pred=Y_forecast,
+                hac_lags=horizon,
+            )[1]
 
-        current_best_val = float(np.nanmean(val_loss[forecast_index, :]))
-
-        if (j == 1) or (j % 12 == 0) or (j == total_oos):
-            r2_now = np.array(
-                [summarize_oos_metrics(Y[:, [m]], Y_forecast_avg[:, [m]])[1][0] for m in range(M)]
-            )
             print(
-                f"[{j:4d}/{total_oos}] "
-                f"date={dates[forecast_index].strftime('%Y-%m-%d')} | "
+                f"[{step:4d}/{total_oos}] "
+                f"date={dates[forecast_idx].strftime('%Y-%m-%d')} | "
+                f"oos_count={oos_count} | "
                 f"retune={retune} | "
-                f"val={current_best_val:10.6f} | "
-                f"arch={current_best_params['archi']} | "
-                f"do={current_best_params['Dropout']} | "
-                f"l1l2={current_best_params['l1l2']} | "
-                f"lr={current_best_params['learning_rate']}"
+                f"refit={refit} | "
+                f"val_mean={float(np.nanmean(seed_val_loss)):10.6f} | "
+                f"val_min={current_best_val:10.6f} | "
+                f"params={json.dumps(current_params)}"
             )
             print("  R2OOS:", np.round(r2_now, 4))
 
-    mse_vec, r2_vec, pval_vec = summarize_oos_metrics(Y, Y_forecast_avg)
+    mse, r2, pval = summarize_oos_metrics(
+        Y_true=Y,
+        Y_pred=Y_forecast,
+        hac_lags=horizon,
+    )
 
     return {
-        f"ValLoss_{model_name}": val_loss,
-        f"Y_forecast_{model_name}": Y_forecast_all,
-        f"Y_forecast_agg_{model_name}": Y_forecast_avg,
-        f"MSE_{model_name}": mse_vec,
-        f"R2OOS_{model_name}": r2_vec,
-        f"R2OOS_pval_{model_name}": pval_vec,
-        f"BestDropout_{model_name}": best_dropout_path,
-        f"BestL1_{model_name}": best_l1_path,
-        f"BestL2_{model_name}": best_l2_path,
+        "Y_Forecast": Y_forecast,
+        "Y_Forecast_All": Y_forecast_all,
+        "ValLoss": val_loss,
+        "MSE": mse,
+        "R2OOS": r2,
+        "R2OOS_pval": pval,
     }
 
 
-def run_experiment(custom_config=None):
-    cfg = copy.deepcopy(custom_config if custom_config is not None else BASE_CONFIG)
+def run_experiment(cfg=None):
+    cfg = copy.deepcopy(CONFIG if cfg is None else cfg)
 
     ncpus = get_cpu_count()
     dumploc = make_dump_dir()
 
-    X_df, Y_df = load_dataset(
-        mat_path=cfg["mat_path"],
-        feature_groups=cfg["feature_groups"],
-        target_group=cfg["target_group"],
-        target_indices=cfg.get("target_indices", None),
-    )
+    try:
+        X_df, Y_df = load_dataset(
+            data_path=cfg["data_path"],
+            feature_groups=cfg["feature_groups"],
+            target_group=cfg["target_group"],
+            target_indices=cfg.get("target_indices"),
+        )
 
-    X = X_df.to_numpy(dtype=float)
-    Y = Y_df.to_numpy(dtype=float)
-    dates = pd.DatetimeIndex(X_df.index)
+        X = X_df.to_numpy(dtype=float)
+        Y = Y_df.to_numpy(dtype=float)
+        dates = pd.DatetimeIndex(X_df.index)
 
-    print(f"CPU count: {ncpus}")
-    print(f"X shape: {X.shape}, Y shape: {Y.shape}")
-    print(f"OOS start: {cfg['oos_start']}")
-    print(f"Feature groups: {cfg['feature_groups']}")
-    print(f"Params: {json.dumps(cfg['params'])}")
+        print(f"CPU count: {ncpus}")
+        print(f"X shape: {X.shape}, Y shape: {Y.shape}")
+        print(f"OOS start: {cfg['oos_start']}")
+        print(f"Feature groups: {cfg['feature_groups']}")
+        print(f"Run tag: {cfg['run_tag']}")
+        print(f"Params: {json.dumps(cfg['params'])}")
 
-    save_dict = build_save_dict(cfg, X_df, Y_df, Y)
-    save_dict.update(run_oos_forecast(X, Y, dates, cfg, dumploc, ncpus))
+        result = run_oos_forecast(
+            X=X,
+            Y=Y,
+            dates=dates,
+            cfg=cfg,
+            dumploc=dumploc,
+            ncpus=ncpus,
+        )
 
-    results_dir = cfg.get("results_dir", "results")
-    os.makedirs(results_dir, exist_ok=True)
+        save_dict = build_save_dict(cfg, X_df, Y_df, Y)
+        save_dict.update(result)
 
-    out_mat = os.path.join(results_dir, result_name(cfg) + ".mat")
-    save_results_mat(out_mat, save_dict)
+        save_results_mat(cfg["out_file"], save_dict)
 
-    print("Saved to", out_mat)
-    print("R2OOS:", np.round(save_dict[f"R2OOS_{cfg['model_name']}"], 4))
+        print("Saved to", cfg["out_file"])
+        print("R2OOS:", np.round(save_dict["R2OOS"], 4))
 
-    safe_rmtree(dumploc)
+        return save_dict, cfg["out_file"]
 
-    return save_dict, out_mat, X_df.columns.tolist(), Y_df.columns.tolist()
+    finally:
+        safe_rmtree(dumploc)
 
 
 if __name__ == "__main__":
-    run_experiment(BASE_CONFIG)
+    run_experiment(CONFIG)
