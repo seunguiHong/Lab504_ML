@@ -44,7 +44,7 @@ CONFIG = {
     "nmc": 100,
     "navg": 10,
     "run_tag": "pc2_only",
-    "out_file": "results/ycNN_pc2_only.mat",
+    "out_file": "results/tab1_yc/ycNN_pc12.mat",
 
     "model_func": NFB.NNModel,
 
