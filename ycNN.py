@@ -33,7 +33,7 @@ from utils import (
 
 CONFIG = {
     "data_path": "data/target_and_features.mat",
-    "feature_groups": ["d12m_y_pc2"],
+    "feature_groups": ["d12m_y_pc1","d12m_y_pc2","d12m_y_pc3"],
     "target_group": "dy",
     "target_indices": None,
 
@@ -43,8 +43,8 @@ CONFIG = {
 
     "nmc": 100,
     "navg": 10,
-    "run_tag": "pc2_only",
-    "out_file": "results/tab1_yc/ycNN_pc12.mat",
+    "run_tag": "pc123",
+    "out_file": "results/tab1_yc/panelC_ycNN_pc123.mat",
 
     "model_func": NFB.NNModel,
 

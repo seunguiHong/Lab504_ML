@@ -19,14 +19,14 @@ from utils import (
 
 CONFIG = {
     "data_path": "data/target_and_features.mat",
-    "feature_groups": ["d12m_fwd"],
+    "feature_groups": ["d12m_y_pc1", "d12m_y_pc2", "d12m_y_pc3"],
     "target_group": "dy",
     "target_indices": None,
 
     "horizon": 12,
     "oos_start": "1989-01-31",
-    "run_tag": "ols_d12m_fwd",
-    "out_file": "results/ycOLS_d12m_fwd.mat",
+    "run_tag": "panelC_ols_pc123",
+    "out_file": "results/tab1_yc/panelC_ols_pc123.mat",
 
     "params": {
         "add_intercept": True,
