@@ -22,14 +22,14 @@ from utils import (
 
 CONFIG = {
     "data_path": "data/target_and_features.mat",
-    "feature_groups": ["d12m_y_pc1", "d12m_y_pc2", "d12m_y_pc3"],
-    "target_group": "dy",
+    "feature_groups": ["fwd"],
+    "target_group": "rx",
     "target_indices": None,
 
     "horizon": 12,
     "oos_start": "1989-01-31",
-    "run_tag": "ridge_d12m_y_pc123",
-    "out_file": "results/tab1_yc/panelC_glm(Ridge)_pc123.mat",
+    "run_tag": "ridge_d12m_fwdchg",
+    "out_file": "results/tab1_rx/panelA_rxglm(Ridge)_fwd.mat",
 
     "params": {
         "estimator": "Ridge",
