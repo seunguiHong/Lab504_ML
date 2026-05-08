@@ -1,4 +1,4 @@
-input_file  = 'raw/2025-12-MD.csv';
+input_file  = 'raw/2026-04-MD.csv';
 output_file = 'fred_md_processed.csv';
 
 C = readcell(input_file, "Delimiter", ",");

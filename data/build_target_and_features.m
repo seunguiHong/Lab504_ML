@@ -60,6 +60,14 @@ function build_target_and_features(in_csv, out_mat)
     end
 
     % ------------------------------------------------------------
+    % 12-month yield change input for 2y..10y
+    % ------------------------------------------------------------
+    D12M_Y = NaN(size(y_input));
+    if size(y_input, 1) > 12
+        D12M_Y(13:end, :) = y_input(13:end, :) - y_input(1:end-12, :);
+    end
+
+    % ------------------------------------------------------------
     % 1-month yield change input for 2y..10y
     % ------------------------------------------------------------
     D1M_Y = NaN(size(y_input));
@@ -219,6 +227,73 @@ function build_target_and_features(in_csv, out_mat)
     end
     RX_pct = 100 * RX_dec;
 
+    % ------------------------------------------------------------
+    % Canonical recursive Cochrane-Piazzesi factor
+    % ------------------------------------------------------------
+    % Canonical CP regression:
+    %
+    %   avg_rx_{t+12}^{2:5}
+    %       = gamma_0
+    %       + gamma_1 y_t^{(1)}
+    %       + gamma_2 f_t^{(2)}
+    %       + gamma_3 f_t^{(3)}
+    %       + gamma_4 f_t^{(4)}
+    %       + gamma_5 f_t^{(5)}
+    %       + error_{t+12}
+    %
+    % Predictors:
+    %   [y1, fwd_2, fwd_3, fwd_4, fwd_5]
+    %
+    % Target:
+    %   mean(rx_2, rx_3, rx_4, rx_5)
+    %
+    % Leakage control:
+    %   row s enters the CP regression at forecast-origin t only if
+    %   s + horizon <= t.
+    %
+    % Units:
+    %   y_annual : decimals
+    %   FWD      : decimals
+    %   RX_dec   : decimals
+    %   CP       : decimals
+    % ------------------------------------------------------------
+    horizon = 12;
+    min_obs_cp = 120;
+
+    CP_X = [y_annual(:, 1), FWD(:, 1:4)];
+    avg_rx_cp_dec = mean(RX_dec(:, 1:4), 2, 'omitnan');
+
+    CP = NaN(T, 1);
+
+    for t = 1:T
+
+        train_end = t - horizon;
+
+        if train_end < min_obs_cp
+            continue;
+        end
+
+        idx_train = (1:train_end)';
+
+        ok_train = all(isfinite(CP_X(idx_train, :)), 2) & ...
+                   isfinite(avg_rx_cp_dec(idx_train));
+
+        if sum(ok_train) < min_obs_cp
+            continue;
+        end
+
+        Xtrain = CP_X(idx_train(ok_train), :);
+        ytrain = avg_rx_cp_dec(idx_train(ok_train));
+
+        Ztrain = [ones(size(Xtrain, 1), 1), Xtrain];
+
+        b = Ztrain \ ytrain;
+
+        if all(isfinite(CP_X(t, :)))
+            CP(t) = [1, CP_X(t, :)] * b;
+        end
+    end
+
     X = struct();
     y = struct();
 
@@ -241,9 +316,17 @@ function build_target_and_features(in_csv, out_mat)
     X.d12m_fwd.data  = D12M_FWD;
     X.d12m_fwd.names = cellstr(compose('d12m_fwd_%dy', 2:10));
 
+    X.d12m_y.Time  = Time;
+    X.d12m_y.data  = D12M_Y;
+    X.d12m_y.names = cellstr(compose('d12m_y_%dy', 2:10));
+
     X.d1m_y.Time  = Time;
     X.d1m_y.data  = D1M_Y;
     X.d1m_y.names = cellstr(compose('d1m_y_%dy', 2:10));
+
+    X.cp.Time  = Time;
+    X.cp.data  = CP;
+    X.cp.names = {'cp'};
 
     X.d12m_y_pc.Time  = Time;
     X.d12m_y_pc.data  = D12M_Y_PC;
@@ -335,6 +418,12 @@ function build_target_and_features(in_csv, out_mat)
     meta.out_mat = char(out_mat);
     meta.X_units = 'decimals';
     meta.y_units = 'percent';
+
+    meta.cp_note = ...
+        'X.cp is the canonical recursive Cochrane-Piazzesi factor. It is estimated from avg rx_2..rx_5 on [y1, fwd_2, fwd_3, fwd_4, fwd_5] using only rows s with s+12 <= t. CP is stored in decimals.';
+
+    meta.d12m_y_note = ...
+        'X.d12m_y contains trailing 12-month yield changes for annual maturities 2y..10y, stored in decimals.';
 
     meta.macro_group_names = { ...
         'macro_output', ...

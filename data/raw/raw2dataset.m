@@ -32,7 +32,7 @@ function raw2dataset()
 
     % 2. Load and Process Macro Factors
     % Note: Ensure the file extension (.xlsx or .csv) matches your actual file
-    macro_raw = readtable('raw/Updated_LN_Macro_Factors_2025AUG.xlsx');
+    macro_raw = readtable('raw/Updated_LN_Macro_Factors_2026FEB.xlsx');
     
     % Convert 'Data' to YYYYMM string
     macro_time = datetime(macro_raw.Data); 
