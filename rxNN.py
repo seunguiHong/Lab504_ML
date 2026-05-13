@@ -32,8 +32,8 @@ from utils import (
 
 
 CONFIG = {
-    "data_path": "data/target_and_features.mat",
-    "feature_groups": ["d12m_fwd"],
+    "data_path": "data/target_and_features_sub.mat",
+    "feature_groups": ["fwd"],
     "target_group": "rx",
     "target_indices": None,
 
@@ -43,15 +43,15 @@ CONFIG = {
 
     "nmc": 100,
     "navg": 10,
-    "run_tag": "rx_fwdchg",
-    "out_file": "results/tab1_rx/panelB_rxNN_rx_fwdchg.mat",
+    "run_tag": "rx_fwd",
+    "out_file": "results_v2.0_sub/sub_panelA_rxNN_rx_fwd_withreg_v4.mat",
 
     "model_func": NFB.NNModel,
 
     "params": {
-        "archi": [3],
-        "Dropout": [0.1, 0.3],
-        "l1l2": [0.01,0.05],
+        "archi": [3,3],
+        "Dropout": [0.1,0.3],
+        "l1l2": [0.1,0.5],
         "learning_rate": 0.02,
         "decay_rate": 0.001,
         "momentum": 0.9,
@@ -60,7 +60,7 @@ CONFIG = {
         "patience": 20,
         "batch_size": 32,
         "validation_split": 0.15,
-        "shuffle": False,
+        "shuffle" : False,
         "loss_name": "mse",
         "huber_delta": 1.0,
     },
