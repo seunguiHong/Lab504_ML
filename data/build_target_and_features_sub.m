@@ -100,20 +100,20 @@ function build_target_and_features_sub(in_csv, out_mat)
     end
 
     % ------------------------------------------------------------
-    % Expanding PCA on 12-month yield changes over m001..m120
+    % Expanding PCA on 12-month yield changes over annual maturities 1y..10y
     % ------------------------------------------------------------
-    T = size(y_120, 1);
-    D12M_Y_120 = NaN(T, 120);
+    D12M_Y_ANN = NaN(T, 10);
     if T > 12
-        D12M_Y_120(13:end, :) = y_120(13:end, :) - y_120(1:end-12, :);
+        D12M_Y_ANN(13:end, :) = y_annual(13:end, :) - y_annual(1:end-12, :);
     end
 
     D12M_Y_PC = NaN(T, 3);
     prev_V = [];
-    min_obs_pca = 24;
+    min_obs_pca = 12;
 
     for t = 13:T
-        D_train = D12M_Y_120(13:t, :);
+
+        D_train = D12M_Y_ANN(13:t, :);
         ok_train = all(isfinite(D_train), 2);
         D_train = D_train(ok_train, :);
 
@@ -121,7 +121,7 @@ function build_target_and_features_sub(in_csv, out_mat)
             continue;
         end
 
-        x_t = D12M_Y_120(t, :);
+        x_t = D12M_Y_ANN(t, :);
         if ~all(isfinite(x_t))
             continue;
         end

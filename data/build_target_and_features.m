@@ -76,20 +76,20 @@ function build_target_and_features(in_csv, out_mat)
     end
 
     % ------------------------------------------------------------
-    % Expanding PCA on 12-month yield changes over m001..m120
+    % Expanding PCA on 12-month yield changes over annual maturities 1y..10y
     % ------------------------------------------------------------
-    T = size(y_120, 1);
-    D12M_Y_120 = NaN(T, 120);
+    D12M_Y_ANN = NaN(T, 10);
     if T > 12
-        D12M_Y_120(13:end, :) = y_120(13:end, :) - y_120(1:end-12, :);
+        D12M_Y_ANN(13:end, :) = y_annual(13:end, :) - y_annual(1:end-12, :);
     end
 
     D12M_Y_PC = NaN(T, 3);
     prev_V = [];
-    min_obs_pca = 24;
+    min_obs_pca = 12;
 
     for t = 13:T
-        D_train = D12M_Y_120(13:t, :);
+
+        D_train = D12M_Y_ANN(13:t, :);
         ok_train = all(isfinite(D_train), 2);
         D_train = D_train(ok_train, :);
 
@@ -97,7 +97,7 @@ function build_target_and_features(in_csv, out_mat)
             continue;
         end
 
-        x_t = D12M_Y_120(t, :);
+        x_t = D12M_Y_ANN(t, :);
         if ~all(isfinite(x_t))
             continue;
         end
@@ -132,62 +132,6 @@ function build_target_and_features(in_csv, out_mat)
     D12M_Y_PC1 = D12M_Y_PC(:, 1);
     D12M_Y_PC2 = D12M_Y_PC(:, 2);
     D12M_Y_PC3 = D12M_Y_PC(:, 3);
-
-    % ------------------------------------------------------------
-    % Expanding PCA on 12-month forward changes over fwd_2..fwd_10
-    % ------------------------------------------------------------
-    D12M_FWD_ANN = NaN(size(FWD));
-    if size(FWD, 1) > 12
-        D12M_FWD_ANN(13:end, :) = FWD(13:end, :) - FWD(1:end-12, :);
-    end
-
-    D12M_FWD_PC = NaN(T, 3);
-    prev_V_dfwd = [];
-
-    for t = 13:T
-        D_train = D12M_FWD_ANN(13:t, :);
-        ok_train = all(isfinite(D_train), 2);
-        D_train = D_train(ok_train, :);
-
-        if size(D_train, 1) < min_obs_pca
-            continue;
-        end
-
-        x_t = D12M_FWD_ANN(t, :);
-        if ~all(isfinite(x_t))
-            continue;
-        end
-
-        mu = mean(D_train, 1);
-        D_center = D_train - mu;
-
-        [~, ~, V] = svd(D_center, 'econ');
-
-        n_keep = min(3, size(V, 2));
-        if n_keep < 1
-            continue;
-        end
-
-        V_use = V(:, 1:n_keep);
-
-        if ~isempty(prev_V_dfwd)
-            n_align = min(size(prev_V_dfwd, 2), size(V_use, 2));
-            for k = 1:n_align
-                if prev_V_dfwd(:, k)' * V_use(:, k) < 0
-                    V_use(:, k) = -V_use(:, k);
-                end
-            end
-        end
-
-        score_t = (x_t - mu) * V_use;
-        D12M_FWD_PC(t, 1:n_keep) = score_t;
-
-        prev_V_dfwd = V_use;
-    end
-
-    D12M_FWD_PC1 = D12M_FWD_PC(:, 1);
-    D12M_FWD_PC2 = D12M_FWD_PC(:, 2);
-    D12M_FWD_PC3 = D12M_FWD_PC(:, 3);
 
     % ------------------------------------------------------------
     % External blocks
