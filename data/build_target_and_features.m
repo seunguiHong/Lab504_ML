@@ -28,9 +28,10 @@ function build_target_and_features(in_csv, out_mat)
         error("Yield matrix has fewer than 120 monthly maturities.");
     end
 
+    T = size(Y_all, 1);
+
     % Full annual nodes: 1y..10y
     y_annual = Y_all(:, 12:12:120);
-    y_120    = Y_all(:, 1:120);
 
     % Inputs use 2y..10y
     y_input = y_annual(:, 2:10);
@@ -44,7 +45,7 @@ function build_target_and_features(in_csv, out_mat)
     S = y_input - y_annual(:, 1);
 
     D12M_S = NaN(size(S));
-    if size(S, 1) > 12
+    if T > 12
         D12M_S(13:end, :) = S(13:end, :) - S(1:end-12, :);
     end
 
@@ -55,7 +56,7 @@ function build_target_and_features(in_csv, out_mat)
     FWD   = y_input .* n_vec - y_annual(:, 1:9) .* (n_vec - 1);
 
     D12M_FWD = NaN(size(FWD));
-    if size(FWD, 1) > 12
+    if T > 12
         D12M_FWD(13:end, :) = FWD(13:end, :) - FWD(1:end-12, :);
     end
 
@@ -63,7 +64,7 @@ function build_target_and_features(in_csv, out_mat)
     % 12-month yield change input for 2y..10y
     % ------------------------------------------------------------
     D12M_Y = NaN(size(y_input));
-    if size(y_input, 1) > 12
+    if T > 12
         D12M_Y(13:end, :) = y_input(13:end, :) - y_input(1:end-12, :);
     end
 
@@ -71,7 +72,7 @@ function build_target_and_features(in_csv, out_mat)
     % 1-month yield change input for 2y..10y
     % ------------------------------------------------------------
     D1M_Y = NaN(size(y_input));
-    if size(y_input, 1) > 1
+    if T > 1
         D1M_Y(2:end, :) = y_input(2:end, :) - y_input(1:end-1, :);
     end
 
@@ -83,55 +84,21 @@ function build_target_and_features(in_csv, out_mat)
         D12M_Y_ANN(13:end, :) = y_annual(13:end, :) - y_annual(1:end-12, :);
     end
 
-    D12M_Y_PC = NaN(T, 3);
-    prev_V = [];
-    min_obs_pca = 12;
-
-    for t = 13:T
-
-        D_train = D12M_Y_ANN(13:t, :);
-        ok_train = all(isfinite(D_train), 2);
-        D_train = D_train(ok_train, :);
-
-        if size(D_train, 1) < min_obs_pca
-            continue;
-        end
-
-        x_t = D12M_Y_ANN(t, :);
-        if ~all(isfinite(x_t))
-            continue;
-        end
-
-        mu = mean(D_train, 1);
-        D_center = D_train - mu;
-
-        [~, ~, V] = svd(D_center, 'econ');
-
-        n_keep = min(3, size(V, 2));
-        if n_keep < 1
-            continue;
-        end
-
-        V_use = V(:, 1:n_keep);
-
-        if ~isempty(prev_V)
-            n_align = min(size(prev_V, 2), size(V_use, 2));
-            for k = 1:n_align
-                if prev_V(:, k)' * V_use(:, k) < 0
-                    V_use(:, k) = -V_use(:, k);
-                end
-            end
-        end
-
-        score_t = (x_t - mu) * V_use;
-        D12M_Y_PC(t, 1:n_keep) = score_t;
-
-        prev_V = V_use;
-    end
+    min_obs_pca = 24;
+    D12M_Y_PC = recursive_pca_scores(D12M_Y_ANN, 3, min_obs_pca);
 
     D12M_Y_PC1 = D12M_Y_PC(:, 1);
     D12M_Y_PC2 = D12M_Y_PC(:, 2);
     D12M_Y_PC3 = D12M_Y_PC(:, 3);
+
+    % ------------------------------------------------------------
+    % Expanding PCA on 12-month forward changes over annual forwards 2y..10y
+    % ------------------------------------------------------------
+    D12M_FWD_PC = recursive_pca_scores(D12M_FWD, 3, min_obs_pca);
+
+    D12M_FWD_PC1 = D12M_FWD_PC(:, 1);
+    D12M_FWD_PC2 = D12M_FWD_PC(:, 2);
+    D12M_FWD_PC3 = D12M_FWD_PC(:, 3);
 
     % ------------------------------------------------------------
     % External blocks
@@ -369,6 +336,14 @@ function build_target_and_features(in_csv, out_mat)
     meta.d12m_y_note = ...
         'X.d12m_y contains trailing 12-month yield changes for annual maturities 2y..10y, stored in decimals.';
 
+    meta.d12m_y_pc_note = ...
+        'X.d12m_y_pc contains expanding PCA scores from trailing 12-month yield changes over annual maturities 1y..10y. PCA loadings are estimated recursively using observations through t, and signs are aligned to the previous available loading. Scores are stored in decimals.';
+
+    meta.d12m_fwd_pc_note = ...
+        'X.d12m_fwd_pc contains expanding PCA scores from trailing 12-month forward-rate changes over annual forwards 2y..10y. PCA loadings are estimated recursively using observations through t, and signs are aligned to the previous available loading. Scores are stored in decimals.';
+
+    meta.pca_min_obs = min_obs_pca;
+
     meta.macro_group_names = { ...
         'macro_output', ...
         'macro_labor', ...
@@ -384,11 +359,63 @@ function build_target_and_features(in_csv, out_mat)
 
 end
 
+function PC = recursive_pca_scores(D, n_pc, min_obs)
+
+    T = size(D, 1);
+    PC = NaN(T, n_pc);
+    prev_V = [];
+
+    for t = 1:T
+
+        D_train = D(1:t, :);
+        ok_train = all(isfinite(D_train), 2);
+        D_train = D_train(ok_train, :);
+
+        if size(D_train, 1) < min_obs
+            continue;
+        end
+
+        x_t = D(t, :);
+        if ~all(isfinite(x_t))
+            continue;
+        end
+
+        mu = mean(D_train, 1);
+        D_center = D_train - mu;
+
+        [~, ~, V] = svd(D_center, 'econ');
+
+        n_keep = min(n_pc, size(V, 2));
+        if n_keep < 1
+            continue;
+        end
+
+        V_use = V(:, 1:n_keep);
+
+        if ~isempty(prev_V)
+            n_align = min(size(prev_V, 2), size(V_use, 2));
+            for k = 1:n_align
+                if prev_V(:, k)' * V_use(:, k) < 0
+                    V_use(:, k) = -V_use(:, k);
+                end
+            end
+        end
+
+        score_t = (x_t - mu) * V_use;
+        PC(t, 1:n_keep) = score_t;
+
+        prev_V = V_use;
+    end
+
+end
+
 function B = make_block(Time, data, names)
+
     B = struct();
     B.Time  = Time;
     B.data  = data;
     B.names = cellstr(names(:)');
+
 end
 
 function G = fred_md_group_definitions()
