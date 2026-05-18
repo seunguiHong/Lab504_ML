@@ -1,144 +1,253 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import copy
-import random
+import os
+
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 
 import numpy as np
-import torch
-import torch.nn as nn
 
 
-def prepare_validation(model, X_fit_raw, X_val_raw, X_test_raw, C):
-    if model == "rawNN":
-        return _prepare_raw_validation(X_fit_raw, X_val_raw, X_test_raw, C)
+def _to_2d(x):
+    x = np.asarray(x, dtype=np.float32)
 
-    if model == "pcNN":
-        return _prepare_pc_validation(X_fit_raw, X_val_raw, X_test_raw, C)
+    if x.ndim == 1:
+        x = x.reshape(-1, 1)
 
-    raise ValueError(f"Unknown model: {model}")
-
-
-def prepare_final(model, X_hist_raw, X_test_raw, C):
-    if model == "rawNN":
-        return _prepare_raw_final(X_hist_raw, X_test_raw, C)
-
-    if model == "pcNN":
-        return _prepare_pc_final(X_hist_raw, X_test_raw, C)
-
-    raise ValueError(f"Unknown model: {model}")
+    return x
 
 
-def build_candidates(C):
-    if len(C.archi) == 0:
-        return [{"archi": []}]
+def _split_train_test(X, Y):
+    X = _to_2d(X)
+    Y = _to_2d(Y)
 
-    candidates = []
+    if X.shape[0] < 2 or Y.shape[0] < 2:
+        raise ValueError("Need at least two rows in X and Y.")
 
-    for dropout in C.dropout_grid:
-        for l1l2 in C.l1l2_grid:
-            l1, l2 = _parse_l1l2(l1l2)
+    X_train = X[:-1, :]
+    Y_train = Y[:-1, :]
+    X_test = X[-1:, :]
 
-            candidates.append(
-                {
-                    "archi": list(C.archi),
-                    "dropout": float(dropout),
-                    "l1": float(l1),
-                    "l2": float(l2),
-                    "learning_rate": float(C.learning_rate),
-                    "decay_rate": float(C.decay_rate),
-                    "momentum": float(C.momentum),
-                    "nesterov": bool(C.nesterov),
-                    "epochs": int(C.epochs),
-                    "patience": int(C.patience),
-                    "batch_size": int(C.batch_size),
-                    "shuffle": bool(C.shuffle),
-                    "loss": str(C.loss).lower(),
-                    "huber_delta": float(C.huber_delta),
-                }
+    return X_train, Y_train, X_test
+
+
+def _get_model_path(dumploc, seed):
+    return os.path.join(dumploc, f"BestModel_{int(seed)}.keras")
+
+
+def _parse_l1l2(value):
+    if value is None:
+        return 0.0, 0.0
+
+    if np.isscalar(value):
+        v = float(value)
+        return v, v
+
+    arr = np.asarray(value, dtype=float).ravel()
+
+    if arr.size == 0:
+        return 0.0, 0.0
+
+    if arr.size == 1:
+        v = float(arr[0])
+        return v, v
+
+    return float(arr[0]), float(arr[1])
+
+
+def _parse_dropout(value):
+    if value is None:
+        return 0.0
+
+    if np.isscalar(value):
+        return float(value)
+
+    arr = np.asarray(value, dtype=float).ravel()
+
+    if arr.size == 0:
+        return 0.0
+
+    return float(arr[0])
+
+
+def _get_loss(loss_name, huber_delta):
+    import keras
+
+    loss_name = str(loss_name).lower()
+
+    if loss_name == "huber":
+        return keras.losses.Huber(delta=float(huber_delta))
+
+    if loss_name in {"mse", "mean_squared_error"}:
+        return "mean_squared_error"
+
+    raise ValueError(f"Unknown loss_name: {loss_name}")
+
+
+def _build_optimizer(fit_cfg):
+    import keras
+
+    lr_schedule = keras.optimizers.schedules.InverseTimeDecay(
+        initial_learning_rate=float(fit_cfg["learning_rate"]),
+        decay_steps=1,
+        decay_rate=float(fit_cfg["decay_rate"]),
+    )
+
+    return keras.optimizers.SGD(
+        learning_rate=lr_schedule,
+        momentum=float(fit_cfg["momentum"]),
+        nesterov=bool(fit_cfg["nesterov"]),
+    )
+
+
+def _scale_fit_val_test(X_fit, X_val, X_test):
+    from sklearn.preprocessing import StandardScaler
+
+    scaler = StandardScaler()
+
+    X_fit_scaled = scaler.fit_transform(X_fit)
+    X_val_scaled = scaler.transform(X_val)
+    X_test_scaled = scaler.transform(X_test)
+
+    return (
+        X_fit_scaled.astype(np.float32),
+        X_val_scaled.astype(np.float32),
+        X_test_scaled.astype(np.float32),
+    )
+
+
+def _purged_split(X_train, Y_train, validation_split, purge_size):
+    n_train = X_train.shape[0]
+
+    val_len = int(np.ceil(n_train * float(validation_split)))
+    fit_end = n_train - int(purge_size) - val_len
+    val_start = fit_end + int(purge_size)
+
+    if fit_end <= 0:
+        raise ValueError(
+            f"Invalid purged split: n_train={n_train}, "
+            f"val_len={val_len}, purge_size={purge_size}."
+        )
+
+    X_fit = X_train[:fit_end, :]
+    Y_fit = Y_train[:fit_end, :]
+    X_val = X_train[val_start:, :]
+    Y_val = Y_train[val_start:, :]
+
+    if X_val.shape[0] == 0:
+        raise ValueError(
+            f"Validation block is empty: n_train={n_train}, "
+            f"val_start={val_start}."
+        )
+
+    return X_fit, Y_fit, X_val, Y_val
+
+
+def _normalize_params(params):
+    params = {} if params is None else dict(params)
+
+    if "archi" not in params:
+        raise ValueError("params must contain 'archi'.")
+
+    defaults = {
+        "Dropout": 0.0,
+        "l1l2": [0.0, 0.0],
+        "learning_rate": 0.03,
+        "decay_rate": 0.001,
+        "momentum": 0.9,
+        "nesterov": True,
+        "epochs": 500,
+        "patience": 20,
+        "batch_size": 32,
+        "validation_split": 0.15,
+        "purge_size": 12,
+        "shuffle": True,
+        "loss_name": "mse",
+        "huber_delta": 1.0,
+        "n_pcs": 3,
+        "pcs": [],
+    }
+
+    for key, value in defaults.items():
+        params.setdefault(key, value)
+
+    return params
+
+
+def _build_single_model(input_dim, output_dim, archi, dropout_u, l1l2penal, fit_cfg):
+    import keras
+    from keras import layers, regularizers
+
+    dropout_u = _parse_dropout(dropout_u)
+    l1_pen, l2_pen = _parse_l1l2(l1l2penal)
+
+    reg = regularizers.l1_l2(l1=l1_pen, l2=l2_pen)
+
+    model = keras.Sequential(name="NN")
+    model.add(layers.Input(shape=(int(input_dim),)))
+
+    for layer_idx, width in enumerate(archi):
+        if layer_idx == 0 and dropout_u > 0.0:
+            model.add(layers.Dropout(dropout_u))
+
+        model.add(
+            layers.Dense(
+                int(width),
+                activation="relu",
+                kernel_initializer="he_normal",
+                bias_initializer="zeros",
+                kernel_regularizer=reg,
             )
+        )
 
-    return candidates
+        if dropout_u > 0.0:
+            model.add(layers.Dropout(dropout_u))
 
+    model.add(layers.BatchNormalization())
 
-def train_validation(X_fit, Y_fit, X_val, Y_val, candidate, seed):
-    if len(candidate["archi"]) == 0:
-        beta = _fit_ols(X_fit, Y_fit)
-        pred = _predict_ols(X_val, beta)
-        return float(np.mean((Y_val - pred) ** 2)), 1
+    model.add(
+        layers.Dense(
+            int(output_dim),
+            activation="linear",
+            kernel_initializer="he_normal",
+            bias_initializer="zeros",
+        )
+    )
 
-    return _train_mlp_validation(X_fit, Y_fit, X_val, Y_val, candidate, seed)
+    model.compile(
+        loss=_get_loss(fit_cfg["loss_name"], fit_cfg["huber_delta"]),
+        optimizer=_build_optimizer(fit_cfg),
+    )
 
-
-def train_final(X_train, Y_train, X_test, candidate, seed, epochs):
-    if len(candidate["archi"]) == 0:
-        beta = _fit_ols(X_train, Y_train)
-        return _predict_ols(X_test, beta).reshape(-1)
-
-    return _train_mlp_final(X_train, Y_train, X_test, candidate, seed, epochs)
-
-
-def _prepare_raw_validation(X_fit_raw, X_val_raw, X_test_raw, C):
-    X_fit = np.asarray(X_fit_raw, dtype=float)
-    X_val = np.asarray(X_val_raw, dtype=float)
-    X_test = np.asarray(X_test_raw, dtype=float)
-
-    if C.standardize:
-        scaler = _fit_standardizer(X_fit)
-        X_fit = _apply_standardizer(X_fit, scaler)
-        X_val = _apply_standardizer(X_val, scaler)
-        X_test = _apply_standardizer(X_test, scaler)
-
-    return X_fit, X_val, X_test
+    return model
 
 
-def _prepare_raw_final(X_hist_raw, X_test_raw, C):
-    X_hist = np.asarray(X_hist_raw, dtype=float)
-    X_test = np.asarray(X_test_raw, dtype=float)
+def _fit_ols(X, Y):
+    X = np.asarray(X, dtype=np.float64)
+    Y = np.asarray(Y, dtype=np.float64)
 
-    if C.standardize:
-        scaler = _fit_standardizer(X_hist)
-        X_hist = _apply_standardizer(X_hist, scaler)
-        X_test = _apply_standardizer(X_test, scaler)
+    if Y.ndim == 1:
+        Y = Y.reshape(-1, 1)
 
-    return X_hist, X_test
+    X_reg = np.column_stack([np.ones(X.shape[0]), X])
+    beta, _, _, _ = np.linalg.lstsq(X_reg, Y, rcond=None)
 
-
-def _prepare_pc_validation(X_fit_raw, X_val_raw, X_test_raw, C):
-    pca = _fit_pca(X_fit_raw, C.pc_ncomp)
-
-    X_fit = _apply_pca(X_fit_raw, pca)[:, C.pc_keep]
-    X_val = _apply_pca(X_val_raw, pca)[:, C.pc_keep]
-    X_test = _apply_pca(X_test_raw, pca)[:, C.pc_keep]
-
-    if C.standardize:
-        scaler = _fit_standardizer(X_fit)
-        X_fit = _apply_standardizer(X_fit, scaler)
-        X_val = _apply_standardizer(X_val, scaler)
-        X_test = _apply_standardizer(X_test, scaler)
-
-    return X_fit, X_val, X_test
+    return beta
 
 
-def _prepare_pc_final(X_hist_raw, X_test_raw, C):
-    pca = _fit_pca(X_hist_raw, C.pc_ncomp)
-
-    X_hist = _apply_pca(X_hist_raw, pca)[:, C.pc_keep]
-    X_test = _apply_pca(X_test_raw, pca)[:, C.pc_keep]
-
-    if C.standardize:
-        scaler = _fit_standardizer(X_hist)
-        X_hist = _apply_standardizer(X_hist, scaler)
-        X_test = _apply_standardizer(X_test, scaler)
-
-    return X_hist, X_test
+def _predict_ols(X, beta):
+    X = np.asarray(X, dtype=np.float64)
+    X_reg = np.column_stack([np.ones(X.shape[0]), X])
+    return (X_reg @ beta).astype(np.float32)
 
 
 def _fit_pca(X, n_components):
-    X = np.asarray(X, dtype=float)
+    X = np.asarray(X, dtype=np.float32)
 
     if X.ndim != 2:
-        raise ValueError("PCA input must be a 2D array.")
+        raise ValueError("PCA input must be 2D.")
 
     mu = np.mean(X, axis=0)
     Xc = X - mu
@@ -153,294 +262,213 @@ def _fit_pca(X, n_components):
         if loadings[k, j] < 0:
             loadings[:, j] *= -1.0
 
-    return {"mean": mu, "loadings": loadings}
+    return {
+        "mean": mu.astype(np.float32),
+        "loadings": loadings.astype(np.float32),
+    }
 
 
 def _apply_pca(X, pca):
-    X = np.asarray(X, dtype=float)
+    X = np.asarray(X, dtype=np.float32)
     return (X - pca["mean"]) @ pca["loadings"]
 
 
-def _fit_standardizer(X):
-    X = np.asarray(X, dtype=float)
+def _pc_indices_from_params(params, n_available):
+    pcs = params.get("pcs", [])
 
-    mu = np.mean(X, axis=0)
-    sd = np.std(X, axis=0, ddof=0)
-    sd[sd < 1e-12] = 1.0
+    if pcs is None:
+        pcs = []
 
-    return {"mean": mu, "std": sd}
-
-
-def _apply_standardizer(X, scaler):
-    X = np.asarray(X, dtype=float)
-    return (X - scaler["mean"]) / scaler["std"]
-
-
-def _fit_ols(X, Y):
-    X = np.asarray(X, dtype=float)
-    Y = np.asarray(Y, dtype=float)
-
-    if Y.ndim == 1:
-        Y = Y.reshape(-1, 1)
-
-    X_reg = _add_intercept(X)
-    beta, _, _, _ = np.linalg.lstsq(X_reg, Y, rcond=None)
-
-    return beta
-
-
-def _predict_ols(X, beta):
-    X = np.asarray(X, dtype=float)
-    return _add_intercept(X) @ beta
-
-
-def _add_intercept(X):
-    return np.column_stack([np.ones(X.shape[0], dtype=float), X])
-
-
-class MLP(nn.Module):
-    def __init__(self, input_dim, output_dim, archi, dropout):
-        super().__init__()
-
-        layers = []
-        prev_dim = int(input_dim)
-
-        for width in archi:
-            layers.append(nn.Linear(prev_dim, int(width)))
-            layers.append(nn.ReLU())
-
-            if float(dropout) > 0.0:
-                layers.append(nn.Dropout(float(dropout)))
-
-            prev_dim = int(width)
-
-        layers.append(nn.Linear(prev_dim, int(output_dim)))
-
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.net(x)
-
-
-def _train_mlp_validation(X_fit, Y_fit, X_val, Y_val, candidate, seed):
-    _set_seed(seed)
-
-    X_fit_t = _tensor(X_fit)
-    Y_fit_t = _tensor(Y_fit)
-    X_val_t = _tensor(X_val)
-    Y_val_t = _tensor(Y_val)
-
-    model = MLP(
-        input_dim=X_fit_t.shape[1],
-        output_dim=Y_fit_t.shape[1],
-        archi=candidate["archi"],
-        dropout=candidate["dropout"],
-    )
-
-    optimizer = torch.optim.SGD(
-        model.parameters(),
-        lr=candidate["learning_rate"],
-        momentum=candidate["momentum"],
-        nesterov=candidate["nesterov"],
-    )
-
-    best_loss = np.inf
-    best_epoch = 1
-    best_state = copy.deepcopy(model.state_dict())
-    stale = 0
-
-    for epoch in range(1, candidate["epochs"] + 1):
-        _set_learning_rate(
-            optimizer,
-            candidate["learning_rate"],
-            candidate["decay_rate"],
-            epoch,
-        )
-
-        _train_epoch(
-            model=model,
-            optimizer=optimizer,
-            X=X_fit_t,
-            Y=Y_fit_t,
-            candidate=candidate,
-            seed=seed + epoch,
-        )
-
-        val_loss = _eval_loss(model, X_val_t, Y_val_t, candidate)
-
-        if val_loss < best_loss:
-            best_loss = val_loss
-            best_epoch = epoch
-            best_state = copy.deepcopy(model.state_dict())
-            stale = 0
-        else:
-            stale += 1
-
-        if stale >= candidate["patience"]:
-            break
-
-    model.load_state_dict(best_state)
-
-    return float(best_loss), int(best_epoch)
-
-
-def _train_mlp_final(X_train, Y_train, X_test, candidate, seed, epochs):
-    _set_seed(seed)
-
-    X_train_t = _tensor(X_train)
-    Y_train_t = _tensor(Y_train)
-    X_test_t = _tensor(X_test)
-
-    model = MLP(
-        input_dim=X_train_t.shape[1],
-        output_dim=Y_train_t.shape[1],
-        archi=candidate["archi"],
-        dropout=candidate["dropout"],
-    )
-
-    optimizer = torch.optim.SGD(
-        model.parameters(),
-        lr=candidate["learning_rate"],
-        momentum=candidate["momentum"],
-        nesterov=candidate["nesterov"],
-    )
-
-    epochs = max(1, int(epochs))
-
-    for epoch in range(1, epochs + 1):
-        _set_learning_rate(
-            optimizer,
-            candidate["learning_rate"],
-            candidate["decay_rate"],
-            epoch,
-        )
-
-        _train_epoch(
-            model=model,
-            optimizer=optimizer,
-            X=X_train_t,
-            Y=Y_train_t,
-            candidate=candidate,
-            seed=seed + epoch,
-        )
-
-    model.eval()
-
-    with torch.no_grad():
-        pred = model(X_test_t).cpu().numpy()
-
-    return pred.reshape(-1)
-
-
-def _train_epoch(model, optimizer, X, Y, candidate, seed):
-    model.train()
-
-    n = X.shape[0]
-    batch_size = max(1, int(candidate["batch_size"]))
-
-    if candidate["shuffle"]:
-        rng = np.random.default_rng(seed)
-        order = rng.permutation(n)
+    if np.isscalar(pcs):
+        pcs = [int(pcs)]
     else:
-        order = np.arange(n)
+        pcs = [int(v) for v in np.asarray(pcs).ravel()]
 
-    for start in range(0, n, batch_size):
-        idx = order[start:start + batch_size]
+    if len(pcs) == 0:
+        return list(range(n_available))
 
-        xb = X[idx]
-        yb = Y[idx]
-
-        optimizer.zero_grad()
-
-        pred = model(xb)
-        loss = _criterion(pred, yb, candidate)
-        loss = loss + _regularization(model, candidate["l1"], candidate["l2"])
-
-        loss.backward()
-        optimizer.step()
-
-
-def _eval_loss(model, X, Y, candidate):
-    model.eval()
-
-    with torch.no_grad():
-        pred = model(X)
-        loss = _criterion(pred, Y, candidate)
-
-    return float(loss.cpu().item())
-
-
-def _criterion(pred, target, candidate):
-    if candidate["loss"] == "huber":
-        return nn.functional.huber_loss(
-            pred,
-            target,
-            delta=float(candidate["huber_delta"]),
-            reduction="mean",
+    if min(pcs) < 1 or max(pcs) > n_available:
+        raise ValueError(
+            f"pcs={pcs} is incompatible with available PCs 1,...,{n_available}."
         )
 
-    if candidate["loss"] == "mse":
-        return nn.functional.mse_loss(pred, target, reduction="mean")
-
-    raise ValueError(f"Unknown loss: {candidate['loss']}")
+    return [j - 1 for j in pcs]
 
 
-def _regularization(model, l1, l2):
-    penalty = None
+def _prepare_pcnn_fit_val_test(X_fit_raw, X_val_raw, X_test_raw, params):
+    n_pcs = int(params.get("n_pcs", 3))
 
-    for name, param in model.named_parameters():
-        if "weight" not in name:
-            continue
+    pca = _fit_pca(X_fit_raw, n_components=n_pcs)
 
-        if penalty is None:
-            penalty = torch.zeros((), dtype=param.dtype, device=param.device)
+    X_fit_pc = _apply_pca(X_fit_raw, pca)
+    X_val_pc = _apply_pca(X_val_raw, pca)
+    X_test_pc = _apply_pca(X_test_raw, pca)
 
-        if l1 > 0:
-            penalty = penalty + float(l1) * torch.sum(torch.abs(param))
+    pc_idx = _pc_indices_from_params(params, X_fit_pc.shape[1])
 
-        if l2 > 0:
-            penalty = penalty + float(l2) * torch.sum(param ** 2)
+    X_fit_pc = X_fit_pc[:, pc_idx]
+    X_val_pc = X_val_pc[:, pc_idx]
+    X_test_pc = X_test_pc[:, pc_idx]
 
-    if penalty is None:
-        return torch.tensor(0.0)
-
-    return penalty
-
-
-def _set_learning_rate(optimizer, initial_lr, decay_rate, epoch):
-    lr = float(initial_lr) / (1.0 + float(decay_rate) * max(0, epoch - 1))
-
-    for group in optimizer.param_groups:
-        group["lr"] = lr
+    return (
+        X_fit_pc.astype(np.float32),
+        X_val_pc.astype(np.float32),
+        X_test_pc.astype(np.float32),
+    )
 
 
-def _tensor(x):
-    x = np.asarray(x, dtype=np.float32)
+def _train_or_load_keras_model(X_fit, Y_fit, X_val, Y_val, X_test, seed, params, dumploc, refit):
+    import keras
+    from keras.callbacks import EarlyStopping
+    from keras.models import load_model
 
-    if x.ndim == 1:
-        x = x.reshape(-1, 1)
+    keras.utils.set_random_seed(int(seed))
 
-    return torch.tensor(x, dtype=torch.float32)
+    model_path = _get_model_path(dumploc, seed)
+
+    if bool(refit) or not os.path.exists(model_path):
+        keras.backend.clear_session()
+
+        model = _build_single_model(
+            input_dim=X_fit.shape[1],
+            output_dim=Y_fit.shape[1],
+            archi=params["archi"],
+            dropout_u=params["Dropout"],
+            l1l2penal=params["l1l2"],
+            fit_cfg=params,
+        )
+
+    else:
+        model = load_model(model_path)
+
+    early_stop = EarlyStopping(
+        monitor="val_loss",
+        min_delta=1e-6,
+        patience=int(params["patience"]),
+        mode="min",
+        restore_best_weights=True,
+        verbose=0,
+    )
+
+    history = model.fit(
+        X_fit,
+        Y_fit,
+        epochs=int(params["epochs"]),
+        validation_data=(X_val, Y_val),
+        batch_size=int(params["batch_size"]),
+        shuffle=bool(params["shuffle"]),
+        callbacks=[early_stop],
+        verbose=0,
+    )
+
+    model.save(model_path)
+
+    y_pred = model.predict(X_test, verbose=0).astype(np.float32)
+
+    val_hist = history.history.get("val_loss", [])
+    val_min = float(np.min(val_hist)) if len(val_hist) > 0 else np.nan
+
+    return y_pred, val_min
 
 
-def _set_seed(seed):
-    seed = int(seed)
+def _fit_single_nn_model(X, Y, seed, params, dumploc, refit):
+    X_train, Y_train, X_test = _split_train_test(X, Y)
 
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    X_fit, Y_fit, X_val, Y_val = _purged_split(
+        X_train,
+        Y_train,
+        validation_split=params["validation_split"],
+        purge_size=params["purge_size"],
+    )
 
-    torch.set_num_threads(1)
-    torch.use_deterministic_algorithms(False)
+    X_fit, X_val, X_test = _scale_fit_val_test(X_fit, X_val, X_test)
+
+    if len(params["archi"]) == 0:
+        beta = _fit_ols(X_fit, Y_fit)
+        y_val_pred = _predict_ols(X_val, beta)
+        y_pred = _predict_ols(X_test, beta)
+        val_loss = float(np.mean((Y_val - y_val_pred) ** 2))
+        return y_pred, val_loss
+
+    return _train_or_load_keras_model(
+        X_fit=X_fit,
+        Y_fit=Y_fit,
+        X_val=X_val,
+        Y_val=Y_val,
+        X_test=X_test,
+        seed=seed,
+        params=params,
+        dumploc=dumploc,
+        refit=refit,
+    )
 
 
-def _parse_l1l2(x):
-    arr = np.asarray(x, dtype=float).ravel()
+def _fit_single_pcnn_model(X, Y, seed, params, dumploc, refit):
+    X_train, Y_train, X_test_raw = _split_train_test(X, Y)
 
-    if arr.size == 0:
-        return 0.0, 0.0
+    X_fit_raw, Y_fit, X_val_raw, Y_val = _purged_split(
+        X_train,
+        Y_train,
+        validation_split=params["validation_split"],
+        purge_size=params["purge_size"],
+    )
 
-    if arr.size == 1:
-        return float(arr[0]), float(arr[0])
+    X_fit, X_val, X_test = _prepare_pcnn_fit_val_test(
+        X_fit_raw=X_fit_raw,
+        X_val_raw=X_val_raw,
+        X_test_raw=X_test_raw,
+        params=params,
+    )
 
-    return float(arr[0]), float(arr[1])
+    X_fit, X_val, X_test = _scale_fit_val_test(X_fit, X_val, X_test)
+
+    if len(params["archi"]) == 0:
+        beta = _fit_ols(X_fit, Y_fit)
+        y_val_pred = _predict_ols(X_val, beta)
+        y_pred = _predict_ols(X_test, beta)
+        val_loss = float(np.mean((Y_val - y_val_pred) ** 2))
+        return y_pred, val_loss
+
+    return _train_or_load_keras_model(
+        X_fit=X_fit,
+        Y_fit=Y_fit,
+        X_val=X_val,
+        Y_val=Y_val,
+        X_test=X_test,
+        seed=seed,
+        params=params,
+        dumploc=dumploc,
+        refit=refit,
+    )
+
+
+def NN(X, Y, no, params=None, refit=None, dumploc=None):
+    if dumploc is None:
+        raise ValueError("Missing dumploc argument.")
+
+    params = _normalize_params(params)
+
+    return _fit_single_nn_model(
+        X=X,
+        Y=Y,
+        seed=no,
+        params=params,
+        dumploc=dumploc,
+        refit=refit,
+    )
+
+
+def pcNN(X, Y, no, params=None, refit=None, dumploc=None):
+    if dumploc is None:
+        raise ValueError("Missing dumploc argument.")
+
+    params = _normalize_params(params)
+
+    return _fit_single_pcnn_model(
+        X=X,
+        Y=Y,
+        seed=no,
+        params=params,
+        dumploc=dumploc,
+        refit=refit,
+    )
