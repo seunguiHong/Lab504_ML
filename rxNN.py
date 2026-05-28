@@ -33,7 +33,7 @@ from utils import (
 
 CONFIG = {
     "data_path": "data/target_and_features_sub.mat",
-    "feature_groups": ["fwd"],
+    "feature_groups": ["d12m_fwd"],
     "target_group": "rx",
     "target_indices": None,
 
@@ -43,15 +43,15 @@ CONFIG = {
 
     "nmc": 100,
     "navg": 10,
-    "run_tag": "rx_fwd",
-    "out_file": "results_v2.0_sub/sub_panelA_rxNN_rx_fwd_withreg_v4.mat",
+    "run_tag": "rx_fwdchg",
+    "out_file": "results_v2.0_sub/sub_panelA_rxNN_rx_fwdchg.mat",
 
     "model_func": NFB.NNModel,
 
     "params": {
-        "archi": [3,3],
-        "Dropout": [0.1,0.3],
-        "l1l2": [0.1,0.5],
+        "archi": [3],
+        "Dropout": [0.0],
+        "l1l2": [0.0],
         "learning_rate": 0.02,
         "decay_rate": 0.001,
         "momentum": 0.9,

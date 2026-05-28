@@ -13,7 +13,7 @@ os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
 data_path = "data/target_and_features.mat"
 
-feature_groups = ["d12m_y_pc2"]
+feature_groups = ["d12m_fwd"]
 
 target_group = "dy"
 target_indices = None
@@ -23,19 +23,18 @@ target_indices = None
 # ============================================================
 
 horizon = 12
-oos_start = "1989-01-31"
+oos_start = "1980-01-31"
 hyper_freq = 60
 
 # ============================================================
 # Monte Carlo / Ensemble
 # ============================================================
 
-nmc = 100
-navg = 10
+nmc = 20
+navg = 5
 
 # Optional. If None, Engine uses available CPU count.
 ncpus = None
-
 # ============================================================
 # Model
 # ============================================================
@@ -52,11 +51,11 @@ params = {
     # pcs is 1-based: [2] means PC2.
     # pcs = [] means use all computed PCs.
     "n_pcs": 3,
-    "pcs": [2],
+    "pcs": [],
 
     # Keras NN training parameters.
-    "Dropout": [0.0],
-    "l1l2": [0.0],
+    "Dropout": [0.0, 0.2],
+    "l1l2": [1,0.5],
     "learning_rate": 0.02,
     "decay_rate": 0.001,
     "momentum": 0.9,
@@ -75,8 +74,8 @@ params = {
 # Output
 # ============================================================
 
-run_tag = "NN_d12m_y_PC2"
-out_file = "results_v2.0/panelC_NN_d12m_y_PC2.mat"
+run_tag = "Rbst_NN_d12m_fwd"
+out_file = "results_v2.0_robustness/Rbst(Pulled)_NN_d12m_fwd-v2.mat"
 
 # ============================================================
 # Run

@@ -32,9 +32,9 @@ from utils import (
 
 
 CONFIG = {
-    "data_path": "data/target_and_features.mat",
-    "feature_groups": ["d12m_y_pc1", "d12m_y_pc2"],
-    "target_group": "dy",
+    "data_path": "data/target_and_features_sub.mat",
+    "feature_groups": ["d12m_fwd"],
+    "target_group": "rx",
     "target_indices": None,
 
     "horizon": 12,
@@ -43,8 +43,8 @@ CONFIG = {
 
     "nmc": 100,
     "navg": 10,
-    "run_tag": "ycNN_ycpc12",
-    "out_file": "results_v2.0/panelC_ycNN_ycpc12.mat",
+    "run_tag": "ycNN_fwdchg",
+    "out_file": "results_v2.0_sub/panelC_ycNN_fwdchg.mat",
 
     "model_func": NFB.NNModel,
 
