@@ -168,6 +168,7 @@ def _normalize_params(params):
         "huber_delta": 1.0,
         "n_pcs": 3,
         "pcs": [],
+        "aggregation": "mean",
     }
 
     for key, value in defaults.items():
@@ -363,7 +364,8 @@ def _train_or_load_keras_model(X_fit, Y_fit, X_val, Y_val, X_test, seed, params,
 
     model.save(model_path)
 
-    y_pred = model.predict(X_test, verbose=0).astype(np.float32)
+    # Use direct call to avoid tf.function retracing warnings for single/small test inputs
+    y_pred = model(X_test, training=False).numpy().astype(np.float32)
 
     val_hist = history.history.get("val_loss", [])
     val_min = float(np.min(val_hist)) if len(val_hist) > 0 else np.nan
@@ -472,3 +474,107 @@ def pcNN(X, Y, no, params=None, refit=None, dumploc=None):
         dumploc=dumploc,
         refit=refit,
     )
+
+
+def MacroNN(X, Y, no, params=None, refit=None, dumploc=None):
+    """BBT (2021) Group Ensemble Neural Network.
+
+    Trains independent shallow NNs on each variable group,
+    then averages their out-of-sample predictions.
+
+    Parameters
+    ----------
+    X : array-like, shape (T, sum(group_sizes))
+        Concatenated feature matrix.  Last row is the test observation.
+    Y : array-like, shape (T, M)
+        Target matrix.  Last row is the test observation.
+    no : int
+        Random seed index.
+    params : dict
+        Must contain ``group_sizes``: list[int] with the column count
+        for each group.  ``sum(group_sizes) == X.shape[1]``.
+        Optional ``aggregation``: ``"mean"`` (default, BBT) or
+        ``"val_weighted"`` (inverse-validation-loss weighting).
+    refit : bool
+        Whether to retrain from scratch.
+    dumploc : str
+        Directory for saving / loading model checkpoints.
+
+    Returns
+    -------
+    y_pred : ndarray, shape (1, M)
+        Averaged out-of-sample prediction.
+    val_loss : float
+        Average validation loss across groups.
+    """
+    if dumploc is None:
+        raise ValueError("Missing dumploc argument.")
+
+    params = _normalize_params(params)
+    group_sizes = params.get("group_sizes", None)
+
+    if group_sizes is None:
+        raise ValueError("MacroNN requires 'group_sizes' in params.")
+
+    group_sizes = [int(s) for s in group_sizes]
+    aggregation = str(params.get("aggregation", "mean")).lower()
+
+    X = _to_2d(np.asarray(X, dtype=np.float32))
+    Y = _to_2d(np.asarray(Y, dtype=np.float32))
+
+    total_cols = sum(group_sizes)
+    if total_cols != X.shape[1]:
+        raise ValueError(
+            f"sum(group_sizes)={total_cols} != X.shape[1]={X.shape[1]}"
+        )
+
+    boundaries = np.cumsum([0] + group_sizes)
+
+    group_preds = []
+    group_val_losses = []
+
+    for g in range(len(group_sizes)):
+        if group_sizes[g] == 0:
+            continue
+
+        X_g = X[:, boundaries[g]:boundaries[g + 1]]
+
+        group_dir = os.path.join(dumploc, f"group_{g}")
+        os.makedirs(group_dir, exist_ok=True)
+
+        y_pred_g, val_loss_g = _fit_single_nn_model(
+            X=X_g,
+            Y=Y,
+            seed=no,
+            params=params,
+            dumploc=group_dir,
+            refit=refit,
+        )
+
+        group_preds.append(np.asarray(y_pred_g, dtype=np.float32))
+        group_val_losses.append(float(val_loss_g))
+
+    if len(group_preds) == 0:
+        n_targets = Y.shape[1]
+        return np.full((1, n_targets), np.nan, dtype=np.float32), np.nan
+
+    preds_stack = np.stack(
+        [p.reshape(-1) for p in group_preds], axis=0
+    )  # (K, M)
+
+    val_losses = np.array(group_val_losses, dtype=np.float64)
+
+    if aggregation == "val_weighted":
+        finite = np.isfinite(val_losses)
+        if finite.any():
+            inv = np.where(finite, 1.0 / np.maximum(val_losses, 1e-12), 0.0)
+            weights = inv / inv.sum()
+            y_pred_final = np.average(preds_stack, axis=0, weights=weights)
+        else:
+            y_pred_final = np.mean(preds_stack, axis=0)
+    else:
+        y_pred_final = np.mean(preds_stack, axis=0)
+
+    val_loss_final = float(np.mean(val_losses))
+
+    return y_pred_final.reshape(1, -1).astype(np.float32), val_loss_final

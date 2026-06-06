@@ -35,6 +35,13 @@ def run(C):
 
         print_experiment_header(C, X, Y, ncpus)
 
+        if C.model == "MacroNN":
+            group_sizes = compute_feature_group_sizes(
+                C.data_path, C.feature_groups,
+            )
+            C.params = dict(C.params)
+            C.params["group_sizes"] = group_sizes
+
         result = run_oos_forecast(
             X=X,
             Y=Y,
@@ -320,6 +327,9 @@ def run_one_seed_job(args):
     elif model_name == "pcNN":
         model_func = NNB.pcNN
 
+    elif model_name == "MacroNN":
+        model_func = NNB.MacroNN
+
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
@@ -576,6 +586,14 @@ def load_dataset(data_path, feature_groups, target_group, target_indices=None, d
     Y_df = subset_target_columns(Y_df, target_indices)
 
     return align_feature_target_frames(X_df, Y_df, dropna=dropna)
+
+
+def compute_feature_group_sizes(data_path, feature_groups):
+    """Return the number of columns in each feature group."""
+    return [
+        load_mat_group_frame(data_path, "X", group).shape[1]
+        for group in feature_groups
+    ]
 
 
 def locate_oos_start_index(dates, oos_start):

@@ -44,9 +44,9 @@ function build_target_and_features(in_csv, out_mat)
     % ------------------------------------------------------------
     S = y_input - y_annual(:, 1);
 
-    D12M_S = NaN(size(S));
+    YOY_S = NaN(size(S));
     if T > 12
-        D12M_S(13:end, :) = S(13:end, :) - S(1:end-12, :);
+        YOY_S(13:end, :) = S(13:end, :) - S(1:end-12, :);
     end
 
     % ------------------------------------------------------------
@@ -55,17 +55,17 @@ function build_target_and_features(in_csv, out_mat)
     n_vec = 2:10;
     FWD   = y_input .* n_vec - y_annual(:, 1:9) .* (n_vec - 1);
 
-    D12M_FWD = NaN(size(FWD));
+    YOY_FWD = NaN(size(FWD));
     if T > 12
-        D12M_FWD(13:end, :) = FWD(13:end, :) - FWD(1:end-12, :);
+        YOY_FWD(13:end, :) = FWD(13:end, :) - FWD(1:end-12, :);
     end
 
     % ------------------------------------------------------------
     % 12-month yield change input for 2y..10y
     % ------------------------------------------------------------
-    D12M_Y = NaN(size(y_input));
+    YOY_Y = NaN(size(y_input));
     if T > 12
-        D12M_Y(13:end, :) = y_input(13:end, :) - y_input(1:end-12, :);
+        YOY_Y(13:end, :) = y_input(13:end, :) - y_input(1:end-12, :);
     end
 
     % ------------------------------------------------------------
@@ -79,26 +79,26 @@ function build_target_and_features(in_csv, out_mat)
     % ------------------------------------------------------------
     % Expanding PCA on 12-month yield changes over annual maturities 1y..10y
     % ------------------------------------------------------------
-    D12M_Y_ANN = NaN(T, 10);
+    YOY_Y_ANN = NaN(T, 10);
     if T > 12
-        D12M_Y_ANN(13:end, :) = y_annual(13:end, :) - y_annual(1:end-12, :);
+        YOY_Y_ANN(13:end, :) = y_annual(13:end, :) - y_annual(1:end-12, :);
     end
 
     min_obs_pca = 24;
-    D12M_Y_PC = recursive_pca_scores(D12M_Y_ANN, 3, min_obs_pca);
+    YOY_Y_PC = recursive_pca_scores(YOY_Y_ANN, 3, min_obs_pca);
 
-    D12M_Y_PC1 = D12M_Y_PC(:, 1);
-    D12M_Y_PC2 = D12M_Y_PC(:, 2);
-    D12M_Y_PC3 = D12M_Y_PC(:, 3);
+    YOY_Y_PC1 = YOY_Y_PC(:, 1);
+    YOY_Y_PC2 = YOY_Y_PC(:, 2);
+    YOY_Y_PC3 = YOY_Y_PC(:, 3);
 
     % ------------------------------------------------------------
     % Expanding PCA on 12-month forward changes over annual forwards 2y..10y
     % ------------------------------------------------------------
-    D12M_FWD_PC = recursive_pca_scores(D12M_FWD, 3, min_obs_pca);
+    YOY_FWD_PC = recursive_pca_scores(YOY_FWD, 3, min_obs_pca);
 
-    D12M_FWD_PC1 = D12M_FWD_PC(:, 1);
-    D12M_FWD_PC2 = D12M_FWD_PC(:, 2);
-    D12M_FWD_PC3 = D12M_FWD_PC(:, 3);
+    YOY_FWD_PC1 = YOY_FWD_PC(:, 1);
+    YOY_FWD_PC2 = YOY_FWD_PC(:, 2);
+    YOY_FWD_PC3 = YOY_FWD_PC(:, 3);
 
     % ------------------------------------------------------------
     % External blocks
@@ -107,7 +107,7 @@ function build_target_and_features(in_csv, out_mat)
     ext_vn = string(T_Ext.Properties.VariableNames);
 
     is_iv      = startsWith(ext_vn, "ATM_IV_");
-    is_macropc = ~cellfun('isempty', regexp(ext_vn, '^F\d+$', 'once'));
+    is_macropc = ~cellfun('isempty', regexp(ext_vn, '^F\d+(_\d+)?$', 'once'));
     is_macro   = ~(is_iv | is_macropc);
 
     % ------------------------------------------------------------
@@ -215,21 +215,21 @@ function build_target_and_features(in_csv, out_mat)
     X.slope.data  = S;
     X.slope.names = cellstr(compose('slope_%dy', 2:10));
 
-    X.d12m_slope.Time  = Time;
-    X.d12m_slope.data  = D12M_S;
-    X.d12m_slope.names = cellstr(compose('d12m_slope_%dy', 2:10));
+    X.yoy_slope.Time  = Time;
+    X.yoy_slope.data  = YOY_S;
+    X.yoy_slope.names = cellstr(compose('yoy_slope_%dy', 2:10));
 
     X.fwd.Time  = Time;
     X.fwd.data  = FWD;
     X.fwd.names = cellstr(compose('fwd_%dy', 2:10));
 
-    X.d12m_fwd.Time  = Time;
-    X.d12m_fwd.data  = D12M_FWD;
-    X.d12m_fwd.names = cellstr(compose('d12m_fwd_%dy', 2:10));
+    X.yoy_fwd.Time  = Time;
+    X.yoy_fwd.data  = YOY_FWD;
+    X.yoy_fwd.names = cellstr(compose('yoy_fwd_%dy', 2:10));
 
-    X.d12m_y.Time  = Time;
-    X.d12m_y.data  = D12M_Y;
-    X.d12m_y.names = cellstr(compose('d12m_y_%dy', 2:10));
+    X.yoy_y.Time  = Time;
+    X.yoy_y.data  = YOY_Y;
+    X.yoy_y.names = cellstr(compose('yoy_y_%dy', 2:10));
 
     X.d1m_y.Time  = Time;
     X.d1m_y.data  = D1M_Y;
@@ -239,37 +239,37 @@ function build_target_and_features(in_csv, out_mat)
     X.cp.data  = CP;
     X.cp.names = {'cp'};
 
-    X.d12m_y_pc.Time  = Time;
-    X.d12m_y_pc.data  = D12M_Y_PC;
-    X.d12m_y_pc.names = {'d12m_y_pc1', 'd12m_y_pc2', 'd12m_y_pc3'};
+    X.yoy_y_pc.Time  = Time;
+    X.yoy_y_pc.data  = YOY_Y_PC;
+    X.yoy_y_pc.names = {'yoy_y_pc1', 'yoy_y_pc2', 'yoy_y_pc3'};
 
-    X.d12m_y_pc1.Time  = Time;
-    X.d12m_y_pc1.data  = D12M_Y_PC1;
-    X.d12m_y_pc1.names = {'d12m_y_pc1'};
+    X.yoy_y_pc1.Time  = Time;
+    X.yoy_y_pc1.data  = YOY_Y_PC1;
+    X.yoy_y_pc1.names = {'yoy_y_pc1'};
 
-    X.d12m_y_pc2.Time  = Time;
-    X.d12m_y_pc2.data  = D12M_Y_PC2;
-    X.d12m_y_pc2.names = {'d12m_y_pc2'};
+    X.yoy_y_pc2.Time  = Time;
+    X.yoy_y_pc2.data  = YOY_Y_PC2;
+    X.yoy_y_pc2.names = {'yoy_y_pc2'};
 
-    X.d12m_y_pc3.Time  = Time;
-    X.d12m_y_pc3.data  = D12M_Y_PC3;
-    X.d12m_y_pc3.names = {'d12m_y_pc3'};
+    X.yoy_y_pc3.Time  = Time;
+    X.yoy_y_pc3.data  = YOY_Y_PC3;
+    X.yoy_y_pc3.names = {'yoy_y_pc3'};
 
-    X.d12m_fwd_pc.Time  = Time;
-    X.d12m_fwd_pc.data  = D12M_FWD_PC;
-    X.d12m_fwd_pc.names = {'d12m_fwd_pc1', 'd12m_fwd_pc2', 'd12m_fwd_pc3'};
+    X.yoy_fwd_pc.Time  = Time;
+    X.yoy_fwd_pc.data  = YOY_FWD_PC;
+    X.yoy_fwd_pc.names = {'yoy_fwd_pc1', 'yoy_fwd_pc2', 'yoy_fwd_pc3'};
 
-    X.d12m_fwd_pc1.Time  = Time;
-    X.d12m_fwd_pc1.data  = D12M_FWD_PC1;
-    X.d12m_fwd_pc1.names = {'d12m_fwd_pc1'};
+    X.yoy_fwd_pc1.Time  = Time;
+    X.yoy_fwd_pc1.data  = YOY_FWD_PC1;
+    X.yoy_fwd_pc1.names = {'yoy_fwd_pc1'};
 
-    X.d12m_fwd_pc2.Time  = Time;
-    X.d12m_fwd_pc2.data  = D12M_FWD_PC2;
-    X.d12m_fwd_pc2.names = {'d12m_fwd_pc2'};
+    X.yoy_fwd_pc2.Time  = Time;
+    X.yoy_fwd_pc2.data  = YOY_FWD_PC2;
+    X.yoy_fwd_pc2.names = {'yoy_fwd_pc2'};
 
-    X.d12m_fwd_pc3.Time  = Time;
-    X.d12m_fwd_pc3.data  = D12M_FWD_PC3;
-    X.d12m_fwd_pc3.names = {'d12m_fwd_pc3'};
+    X.yoy_fwd_pc3.Time  = Time;
+    X.yoy_fwd_pc3.data  = YOY_FWD_PC3;
+    X.yoy_fwd_pc3.names = {'yoy_fwd_pc3'};
 
     X.iv.Time  = Time;
     X.iv.data  = table2array(T_Ext(:, is_iv));
@@ -333,14 +333,14 @@ function build_target_and_features(in_csv, out_mat)
     meta.cp_note = ...
         'X.cp is the canonical recursive Cochrane-Piazzesi factor. It is estimated from avg rx_2..rx_5 on [y1, fwd_2, fwd_3, fwd_4, fwd_5] using only rows s with s+12 <= t. CP is stored in decimals.';
 
-    meta.d12m_y_note = ...
-        'X.d12m_y contains trailing 12-month yield changes for annual maturities 2y..10y, stored in decimals.';
+    meta.yoy_y_note = ...
+        'X.yoy_y contains trailing 12-month yield changes for annual maturities 2y..10y, stored in decimals.';
 
-    meta.d12m_y_pc_note = ...
-        'X.d12m_y_pc contains expanding PCA scores from trailing 12-month yield changes over annual maturities 1y..10y. PCA loadings are estimated recursively using observations through t, and signs are aligned to the previous available loading. Scores are stored in decimals.';
+    meta.yoy_y_pc_note = ...
+        'X.yoy_y_pc contains expanding PCA scores from trailing 12-month yield changes over annual maturities 1y..10y. PCA loadings are estimated recursively using observations through t, and signs are aligned to the previous available loading. Scores are stored in decimals.';
 
-    meta.d12m_fwd_pc_note = ...
-        'X.d12m_fwd_pc contains expanding PCA scores from trailing 12-month forward-rate changes over annual forwards 2y..10y. PCA loadings are estimated recursively using observations through t, and signs are aligned to the previous available loading. Scores are stored in decimals.';
+    meta.yoy_fwd_pc_note = ...
+        'X.yoy_fwd_pc contains expanding PCA scores from trailing 12-month forward-rate changes over annual forwards 2y..10y. PCA loadings are estimated recursively using observations through t, and signs are aligned to the previous available loading. Scores are stored in decimals.';
 
     meta.pca_min_obs = min_obs_pca;
 
@@ -423,11 +423,10 @@ function G = fred_md_group_definitions()
     G = struct();
 
     G.output = string({ ...
-        'RPI','W875RX1','DPCERA3M086SBEA','CMRMTSPLx','RETAILx', ...
+        'RPI','W875RX1', ...
         'INDPRO','IPFPNSS','IPFINAL','IPCONGD','IPDCONGD','IPNCONGD', ...
         'IPBUSEQ','IPMAT','IPDMAT','IPNMAT','IPMANSICS','IPB51222S','IPFUELS', ...
-        'CUMFNS', ...
-        'DTCOLNVHFNM','DTCTHFNM','INVEST' ...
+        'CUMFNS' ...
     });
 
     G.labor = string({ ...
@@ -445,12 +444,15 @@ function G = fred_md_group_definitions()
     });
 
     G.orders = string({ ...
-        'ACOGNO','AMDMNOx','ANDENOx','AMDMUOx','BUSINVx','ISRATIOx' ...
+        'DPCERA3M086SBEA','CMRMTSPLx','RETAILx', ...
+        'ACOGNO','AMDMNOx','ANDENOx','AMDMUOx','BUSINVx','ISRATIOx', ...
+        'UMCSENTx' ...
     });
 
     G.money = string({ ...
         'M1SL','M2SL','M2REAL','BOGMBASE','TOTRESNS','NONBORRES', ...
-        'BUSLOANS','REALLN','NONREVSL','CONSPI' ...
+        'BUSLOANS','REALLN','NONREVSL','CONSPI', ...
+        'DTCOLNVHFNM','DTCTHFNM','INVEST' ...
     });
 
     G.ratesfx = string({ ...
@@ -467,7 +469,7 @@ function G = fred_md_group_definitions()
     });
 
     G.stock = string({ ...
-        'S&P 500','S&P div yield','S&P PE ratio','UMCSENTx','VIXCLSx' ...
+        'S_P500','S_PDivYield','S_PPERatio','VIXCLSx' ...
     });
 
 end

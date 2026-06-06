@@ -1,0 +1,40 @@
+% KPSS and Phillips-Perron (PP) Joint Stationarity Test Table
+\begin{table}[tbp]
+  \centering
+  \caption{KPSS and Phillips-Perron (PP) Stationarity Test Results}
+  \label{tab:kpss_pp_results}
+  \begin{tabular}{lccccccccc}
+    \toprule
+    Maturity & 2Y & 3Y & 4Y & 5Y & 6Y & 7Y & 8Y & 9Y & 10Y \\
+    \midrule
+    \multicolumn{10}{l}{\textbf{Panel A: Forward Rates ($f_t^{(n)}$)}} \\
+    \noalign{\vskip 2pt}
+    KPSS Stat          &   2.1323 &   2.1854 &   2.0842 &   2.0538 &   1.9235 &   1.9406 &   2.8182 &   2.7862 &   2.8193 \\
+      p-value          &   0.0100 &   0.0100 &   0.0100 &   0.0100 &   0.0100 &   0.0100 &   0.0100 &   0.0100 &   0.0100 \\
+      Lags (NW)        &       17 &       17 &       17 &       17 &       17 &       17 &       16 &       16 &       16 \\
+    \noalign{\vskip 3pt}
+    PP Stat            &  -1.7627 &  -1.5937 &  -1.5857 &  -1.5476 &  -1.6175 &  -1.8229 &  -1.2910 &  -1.5116 &  -1.8935 \\
+      p-value          &   0.3991 &   0.4868 &   0.4907 &   0.5099 &   0.4740 &   0.3692 &   0.6333 &   0.5278 &   0.3351 \\
+      Lags (NW)        &       21 &       21 &       21 &       21 &       21 &       21 &       20 &       20 &       20 \\
+    \midrule
+    \multicolumn{10}{l}{\textbf{Panel B: YoY Change in Forward Rates ($\Delta f_t^{(n)}$)}} \\
+    \noalign{\vskip 2pt}
+    KPSS Stat          &   0.1420 &   0.1720 &   0.1888 &   0.2226 &   0.1985 &   0.1484 &   0.2007 &   0.1403 &   0.0861 \\
+      p-value          &   0.1000 &   0.1000 &   0.1000 &   0.1000 &   0.1000 &   0.1000 &   0.1000 &   0.1000 &   0.1000 \\
+      Lags (NW)        &       16 &       16 &       16 &       16 &       16 &       16 &       15 &       15 &       15 \\
+    \noalign{\vskip 3pt}
+    PP Stat            &  -6.0303 &  -6.1026 &  -6.3389 &  -6.4693 &  -6.5764 &  -6.3385 &  -6.8875 &  -5.9156 &  -5.1980 \\
+      p-value          &   0.0000 &   0.0000 &   0.0000 &   0.0000 &   0.0000 &   0.0000 &   0.0000 &   0.0000 &   0.0000 \\
+      Lags (NW)        &       20 &       20 &       20 &       20 &       20 &       20 &       20 &       20 &       20 \\
+    \bottomrule
+  \end{tabular}
+  \begin{tablenotes}[flushleft]
+    \small
+    \item \textit{Note:} This table reports the Kwiatkowsi-Phillips-Schmidt-Shin (KPSS) and Phillips-Perron (PP) stationarity test statistics and p-values.
+    The null hypothesis ($H_0$) for the KPSS test is that the series is level-stationary, whereas the null hypothesis ($H_0$) for the PP test is that the series has a unit root.
+    Panel A displays results for annual forward rates $f_t^{(n)}$, and Panel B displays results for the trailing 12-month change in forward rates $\Delta f_t^{(n)}$.
+    All models include an intercept. Bandwidths/lags are selected automatically using the Newey-West (NW) automatic lag selection method.
+    KPSS critical values for level-stationarity are 0.7390 (1\%%), 0.4630 (5\%%), and 0.3470 (10\%%).
+    PP critical values match the ADF critical values: $-$3.4388 (1\%%), $-$2.8653 (5\%%), and $-$2.5688 (10\%%).
+  \end{tablenotes}
+\end{table}

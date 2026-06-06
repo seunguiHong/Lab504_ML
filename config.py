@@ -13,7 +13,7 @@ os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
 data_path = "data/target_and_features.mat"
 
-feature_groups = ["d12m_fwd"]
+feature_groups = ["yoy_fwd"]
 
 target_group = "dy"
 target_indices = None
@@ -74,8 +74,8 @@ params = {
 # Output
 # ============================================================
 
-run_tag = "Rbst_NN_d12m_fwd"
-out_file = "results_v2.0_robustness/Rbst(Pulled)_NN_d12m_fwd-v2.mat"
+run_tag = "Rbst_NN_yoy_fwd"
+out_file = "results_v2.0_robustness/Rbst(Pulled)_NN_yoy_fwd-v2.mat"
 
 # ============================================================
 # Run

@@ -1,0 +1,32 @@
+% Augmented Dickey-Fuller (ADF) Test Table
+\begin{table}[tbp]
+  \centering
+  \caption{Augmented Dickey-Fuller (ADF) Unit Root Test Results}
+  \label{tab:adf_test_results}
+  \begin{tabular}{lccccccccc}
+    \toprule
+    Maturity & 2Y & 3Y & 4Y & 5Y & 6Y & 7Y & 8Y & 9Y & 10Y \\
+    \midrule
+    \multicolumn{10}{l}{\textbf{Panel A: Forward Rates ($f_t^{(n)}$)}} \\
+    \noalign{\vskip 2pt}
+    ADF Stat           &  -1.7550 &  -1.7048 &  -1.4254 &  -1.5750 &  -1.6784 &  -1.7856 &  -1.1823 &  -1.5198 &  -1.2334 \\
+    p-value            &   0.4030 &   0.4286 &   0.5700 &   0.4961 &   0.4423 &   0.3876 &   0.6812 &   0.5237 &   0.6591 \\
+    Lags (AIC)         &        2 &        0 &        7 &        2 &        6 &        2 &       11 &        2 &       19 \\
+    Observations       &      772 &      774 &      767 &      772 &      768 &      772 &      641 &      650 &      633 \\
+    \midrule
+    \multicolumn{10}{l}{\textbf{Panel B: YoY Change in Forward Rates ($\Delta f_t^{(n)}$)}} \\
+    \noalign{\vskip 2pt}
+    ADF Stat           &  -5.9946 &  -5.7710 &  -6.1075 &  -5.8309 &  -5.9548 &  -6.1170 &  -3.9893 &  -6.1509 &  -6.3494 \\
+    p-value            &   0.0000 &   0.0000 &   0.0000 &   0.0000 &   0.0000 &   0.0000 &   0.0015 &   0.0000 &   0.0000 \\
+    Lags (AIC)         &       13 &       18 &       12 &       12 &       16 &       13 &       14 &       12 &       17 \\
+    Observations       &      749 &      744 &      750 &      750 &      746 &      749 &      626 &      628 &      623 \\
+    \bottomrule
+  \end{tabular}
+  \begin{tablenotes}[flushleft]
+    \small
+    \item \textit{Note:} This table reports the Augmented Dickey-Fuller (ADF) unit root test statistics and corresponding $p$-values for the yield curve variables.
+    Panel A displays results for annual forward rates $f_t^{(n)}$, and Panel B displays results for the trailing 12-month change in forward rates $\Delta f_t^{(n)} = f_t^{(n)} - f_{t-12}^{(n)}$.
+    All models include an intercept (drift term). Lag lengths are selected automatically for each series using the Akaike Information Criterion (AIC).
+    Asymptotic critical values for the constant-only model are $-$3.4388 (1\%% significance level), $-$2.8653 (5\%% significance level), and $-$2.5688 (10\%% significance level).
+  \end{tablenotes}
+\end{table}
