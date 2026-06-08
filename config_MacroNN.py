@@ -34,7 +34,7 @@ target_indices = None
 # ============================================================
 
 horizon = 12
-oos_start = "1980-01-31"
+oos_start = "1989-01-31"
 hyper_freq = 60
 
 # ============================================================
@@ -75,9 +75,8 @@ params = {
     "huber_delta": 1.0,
 
     # Group Ensemble aggregation:
-    #   "mean"         – simple average (BBT default)
-    #   "val_weighted" – inverse-validation-loss weighting
-    "aggregation": "mean",
+    # Deprecated – the unified model's output layer now learns optimal weights automatically.
+    # "aggregation": "mean",
 }
 
 # ============================================================

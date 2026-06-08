@@ -476,25 +476,142 @@ def pcNN(X, Y, no, params=None, refit=None, dumploc=None):
     )
 
 
-def MacroNN(X, Y, no, params=None, refit=None, dumploc=None):
-    """BBT (2021) Group Ensemble Neural Network.
+def _build_multibranch_model(group_sizes, output_dim, archi, dropout_u, l1l2penal, fit_cfg):
+    import keras
+    from keras import layers, regularizers
+    
+    dropout_u = _parse_dropout(dropout_u)
+    l1_pen, l2_pen = _parse_l1l2(l1l2penal)
+    reg = regularizers.l1_l2(l1=l1_pen, l2=l2_pen)
+    
+    inputs = []
+    branches = []
+    
+    for g_idx, g_size in enumerate(group_sizes):
+        if g_size == 0:
+            continue
+        
+        group_input = layers.Input(shape=(int(g_size),), name=f"group_input_{g_idx}")
+        inputs.append(group_input)
+        
+        x = group_input
+        for layer_idx, width in enumerate(archi):
+            if layer_idx == 0 and dropout_u > 0.0:
+                x = layers.Dropout(dropout_u)(x)
+            
+            x = layers.Dense(
+                int(width),
+                activation="relu",
+                kernel_initializer="he_normal",
+                bias_initializer="zeros",
+                kernel_regularizer=reg,
+                name=f"branch_{g_idx}_dense_{layer_idx}"
+            )(x)
+            
+            if dropout_u > 0.0:
+                x = layers.Dropout(dropout_u)(x)
+        
+        branches.append(x)
+    
+    if len(branches) > 1:
+        merged = layers.Concatenate(name="concat_branches")(branches)
+    else:
+        merged = branches[0]
+        
+    merged = layers.BatchNormalization(name="batch_norm")(merged)
+    
+    outputs = layers.Dense(
+        int(output_dim),
+        activation="linear",
+        kernel_initializer="he_normal",
+        bias_initializer="zeros",
+        name="output_layer"
+    )(merged)
+    
+    model = keras.Model(inputs=inputs, outputs=outputs, name="MacroNN")
+    
+    model.compile(
+        loss=_get_loss(fit_cfg["loss_name"], fit_cfg["huber_delta"]),
+        optimizer=_build_optimizer(fit_cfg),
+    )
+    
+    return model
 
-    Trains independent shallow NNs on each variable group,
-    then averages their out-of-sample predictions.
+
+def _train_or_load_multibranch_model(X_fit_list, Y_fit, X_val_list, Y_val, X_test_list, seed, params, dumploc, refit):
+    import keras
+    from keras.callbacks import EarlyStopping
+    from keras.models import load_model
+
+    keras.utils.set_random_seed(int(seed))
+
+    model_path = _get_model_path(dumploc, seed)
+    group_sizes = [int(s) for s in params["group_sizes"] if int(s) > 0]
+    output_dim = Y_fit.shape[1]
+
+    if bool(refit) or not os.path.exists(model_path):
+        keras.backend.clear_session()
+
+        model = _build_multibranch_model(
+            group_sizes=group_sizes,
+            output_dim=output_dim,
+            archi=params["archi"],
+            dropout_u=params["Dropout"],
+            l1l2penal=params["l1l2"],
+            fit_cfg=params,
+        )
+
+    else:
+        model = load_model(model_path)
+
+    early_stop = EarlyStopping(
+        monitor="val_loss",
+        min_delta=1e-6,
+        patience=int(params["patience"]),
+        mode="min",
+        restore_best_weights=True,
+        verbose=0,
+    )
+
+    history = model.fit(
+        X_fit_list,
+        Y_fit,
+        epochs=int(params["epochs"]),
+        validation_data=(X_val_list, Y_val),
+        batch_size=int(params["batch_size"]),
+        shuffle=bool(params["shuffle"]),
+        callbacks=[early_stop],
+        verbose=0,
+    )
+
+    model.save(model_path)
+
+    # Use direct model call to avoid tf.function retracing warnings
+    y_pred = model(X_test_list, training=False).numpy().astype(np.float32)
+
+    val_hist = history.history.get("val_loss", [])
+    val_min = float(np.min(val_hist)) if len(val_hist) > 0 else np.nan
+
+    return y_pred, val_min
+
+
+def MacroNN(X, Y, no, params=None, refit=None, dumploc=None):
+    """BBT (2021) Group-ensemble Neural Network.
+
+    Trains a single unified network with multi-branch inputs (one branch per feature group),
+    concatenates their representation, and trains them end-to-end.
 
     Parameters
     ----------
     X : array-like, shape (T, sum(group_sizes))
-        Concatenated feature matrix.  Last row is the test observation.
+        Concatenated feature matrix. Last row is the test observation.
     Y : array-like, shape (T, M)
-        Target matrix.  Last row is the test observation.
+        Target matrix. Last row is the test observation.
     no : int
         Random seed index.
     params : dict
         Must contain ``group_sizes``: list[int] with the column count
-        for each group.  ``sum(group_sizes) == X.shape[1]``.
-        Optional ``aggregation``: ``"mean"`` (default, BBT) or
-        ``"val_weighted"`` (inverse-validation-loss weighting).
+        for each group. ``sum(group_sizes) == X.shape[1]``.
     refit : bool
         Whether to retrain from scratch.
     dumploc : str
@@ -503,9 +620,9 @@ def MacroNN(X, Y, no, params=None, refit=None, dumploc=None):
     Returns
     -------
     y_pred : ndarray, shape (1, M)
-        Averaged out-of-sample prediction.
+        Unified multi-branch out-of-sample prediction.
     val_loss : float
-        Average validation loss across groups.
+        Validation loss of the unified model.
     """
     if dumploc is None:
         raise ValueError("Missing dumploc argument.")
@@ -517,7 +634,6 @@ def MacroNN(X, Y, no, params=None, refit=None, dumploc=None):
         raise ValueError("MacroNN requires 'group_sizes' in params.")
 
     group_sizes = [int(s) for s in group_sizes]
-    aggregation = str(params.get("aggregation", "mean")).lower()
 
     X = _to_2d(np.asarray(X, dtype=np.float32))
     Y = _to_2d(np.asarray(Y, dtype=np.float32))
@@ -528,53 +644,63 @@ def MacroNN(X, Y, no, params=None, refit=None, dumploc=None):
             f"sum(group_sizes)={total_cols} != X.shape[1]={X.shape[1]}"
         )
 
-    boundaries = np.cumsum([0] + group_sizes)
+    # 1. Split train, test, fit, val
+    X_train, Y_train, X_test = _split_train_test(X, Y)
+    X_fit_raw, Y_fit, X_val_raw, Y_val = _purged_split(
+        X_train,
+        Y_train,
+        validation_split=params["validation_split"],
+        purge_size=params["purge_size"],
+    )
 
-    group_preds = []
-    group_val_losses = []
+    # 2. Slice and scale each group
+    boundaries = np.cumsum([0] + group_sizes)
+    X_fit_list = []
+    X_val_list = []
+    X_test_list = []
 
     for g in range(len(group_sizes)):
-        if group_sizes[g] == 0:
+        g_size = group_sizes[g]
+        if g_size == 0:
             continue
 
-        X_g = X[:, boundaries[g]:boundaries[g + 1]]
+        g_fit = X_fit_raw[:, boundaries[g]:boundaries[g + 1]]
+        g_val = X_val_raw[:, boundaries[g]:boundaries[g + 1]]
+        g_test = X_test[:, boundaries[g]:boundaries[g + 1]]
 
-        group_dir = os.path.join(dumploc, f"group_{g}")
-        os.makedirs(group_dir, exist_ok=True)
+        # Scale each group individually
+        from sklearn.preprocessing import StandardScaler
+        scaler = StandardScaler()
+        g_fit_scaled = scaler.fit_transform(g_fit).astype(np.float32)
+        g_val_scaled = scaler.transform(g_val).astype(np.float32)
+        g_test_scaled = scaler.transform(g_test).astype(np.float32)
 
-        y_pred_g, val_loss_g = _fit_single_nn_model(
-            X=X_g,
-            Y=Y,
-            seed=no,
-            params=params,
-            dumploc=group_dir,
-            refit=refit,
-        )
+        X_fit_list.append(g_fit_scaled)
+        X_val_list.append(g_val_scaled)
+        X_test_list.append(g_test_scaled)
 
-        group_preds.append(np.asarray(y_pred_g, dtype=np.float32))
-        group_val_losses.append(float(val_loss_g))
+    # Handle OLS edge-case if archi is empty
+    if len(params["archi"]) == 0:
+        # Perform OLS on concatenated scaled inputs
+        X_fit_cat = np.hstack(X_fit_list)
+        X_val_cat = np.hstack(X_val_list)
+        X_test_cat = np.hstack(X_test_list)
 
-    if len(group_preds) == 0:
-        n_targets = Y.shape[1]
-        return np.full((1, n_targets), np.nan, dtype=np.float32), np.nan
+        beta = _fit_ols(X_fit_cat, Y_fit)
+        y_val_pred = _predict_ols(X_val_cat, beta)
+        y_pred = _predict_ols(X_test_cat, beta)
+        val_loss = float(np.mean((Y_val - y_val_pred) ** 2))
+        return y_pred, val_loss
 
-    preds_stack = np.stack(
-        [p.reshape(-1) for p in group_preds], axis=0
-    )  # (K, M)
-
-    val_losses = np.array(group_val_losses, dtype=np.float64)
-
-    if aggregation == "val_weighted":
-        finite = np.isfinite(val_losses)
-        if finite.any():
-            inv = np.where(finite, 1.0 / np.maximum(val_losses, 1e-12), 0.0)
-            weights = inv / inv.sum()
-            y_pred_final = np.average(preds_stack, axis=0, weights=weights)
-        else:
-            y_pred_final = np.mean(preds_stack, axis=0)
-    else:
-        y_pred_final = np.mean(preds_stack, axis=0)
-
-    val_loss_final = float(np.mean(val_losses))
-
-    return y_pred_final.reshape(1, -1).astype(np.float32), val_loss_final
+    # 3. Train unified multibranch model
+    return _train_or_load_multibranch_model(
+        X_fit_list=X_fit_list,
+        Y_fit=Y_fit,
+        X_val_list=X_val_list,
+        Y_val=Y_val,
+        X_test_list=X_test_list,
+        seed=no,
+        params=params,
+        dumploc=dumploc,
+        refit=refit,
+    )
