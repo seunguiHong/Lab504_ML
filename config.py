@@ -73,9 +73,19 @@ params = {
 # ============================================================
 # Output
 # ============================================================
+#
+# Filename is assembled by Engine.build_out_file from the fields below:
+#   [Panel<X>_]<target>_<model>_<predictor>_<ensembling>_<regularization>[_<suffix>].mat
+# target/model/ensembling/regularization are read from the settings above.
+# Leave out_file = None to use the convention. Set it only to override.
+
+results_root = "results"      # output directory
+panel = None                  # "A" / "B" for paper panels; None to omit
+predictor_label = None        # None -> derived from feature_groups
+name_suffix = "oos1980"       # optional tag; None to omit
 
 run_tag = "Rbst_NN_yoy_fwd"
-out_file = "results_v2.0_robustness/Rbst(Pulled)_NN_yoy_fwd-v2.mat"
+out_file = None               # -> results/yc_NN_yoy_fwd_ens20x5_l11l20p5do0p2_oos1980.mat
 
 # ============================================================
 # Run

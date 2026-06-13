@@ -1,0 +1,546 @@
+
+########################################################################
+Candidate: dy9target_a1_lr0p003_l220_ep1_p0_b32
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p003_l220_ep1_p0_b32.mat
+########################################################################
+Existing result found; using saved MAT.
+Candidate R2OOS: [-0.000186839141]
+dy_9 R2OOS     : -0.000186839141
+dy_9 is below target 0.010000000000; continuing to next hyperparameter set.
+
+########################################################################
+Candidate: dy9target_a1_lr0p001_l250_ep1_p0_b32
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l250_ep1_p0_b32.mat
+########################################################################
+Existing result found; using saved MAT.
+Candidate R2OOS: [-8.56727780858e-05]
+dy_9 R2OOS     : -0.000085672778
+dy_9 is below target 0.010000000000; continuing to next hyperparameter set.
+
+########################################################################
+Candidate: dy9target_a1_lr0p001_l250_ep2_p0_b32
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l250_ep2_p0_b32.mat
+########################################################################
+Existing result found; using saved MAT.
+Candidate R2OOS: [4.477676973103e-05]
+dy_9 R2OOS     : 0.000044776770
+dy_9 is below target 0.010000000000; continuing to next hyperparameter set.
+
+########################################################################
+Candidate: dy9target_a1_lr0p001_l2100_ep1_p0_b32_bias1_outreg1_hf12
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l2100_ep1_p0_b32_bias1_outreg1_hf12.mat
+########################################################################
+Existing result found; using saved MAT.
+Candidate R2OOS: [-0.029868143116]
+dy_9 R2OOS     : -0.029868143116
+dy_9 is below target 0.010000000000; continuing to next hyperparameter set.
+
+########################################################################
+Candidate: dy9target_a1_lr0p001_l2100_ep1_p0_b32_bias1_outreg0_hf12
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l2100_ep1_p0_b32_bias1_outreg0_hf12.mat
+########################################################################
+Existing result found; using saved MAT.
+Candidate R2OOS: [-0.117378297885]
+dy_9 R2OOS     : -0.117378297885
+dy_9 is below target 0.010000000000; continuing to next hyperparameter set.
+
+########################################################################
+Candidate: dy9target_a1_lr0p0005_l2100_ep1_p0_b32_bias1_outreg0_hf12
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p0005_l2100_ep1_p0_b32_bias1_outreg0_hf12.mat
+########################################################################
+Existing result found; using saved MAT.
+Candidate R2OOS: [-0.074061192763]
+dy_9 R2OOS     : -0.074061192763
+dy_9 is below target 0.010000000000; continuing to next hyperparameter set.
+
+########################################################################
+Candidate: dy9target_a1_lr0p0003_l2100_ep1_p0_b32_bias1_outreg0_hf12
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p0003_l2100_ep1_p0_b32_bias1_outreg0_hf12.mat
+########################################################################
+Existing result found; using saved MAT.
+Candidate R2OOS: [-0.053310113311]
+dy_9 R2OOS     : -0.053310113311
+dy_9 is below target 0.010000000000; continuing to next hyperparameter set.
+
+########################################################################
+Candidate: dy9target_a1_lr0p001_l2200_ep1_p0_b32_bias1_outreg0_hf12
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l2200_ep1_p0_b32_bias1_outreg0_hf12.mat
+########################################################################
+Existing result found; using saved MAT.
+Candidate R2OOS: [-0.136013738657]
+dy_9 R2OOS     : -0.136013738657
+dy_9 is below target 0.010000000000; continuing to next hyperparameter set.
+
+########################################################################
+Candidate: dy9target_a1_lr0p001_l250_ep1_p0_b32_bias1_outreg0_hf6_val30
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l250_ep1_p0_b32_bias1_outreg0_hf6_val30.mat
+########################################################################
+
+========================================================================
+Experiment settings
+========================================================================
+Data path       : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\data\target_and_features.mat
+Feature groups  : ['yoy_fwd']
+Target group    : dy
+Target indices  : [8]
+Model           : NN
+Run tag         : nmc100_navg10_0608_dy9target_a1_lr0p001_l250_ep1_p0_b32_bias1_outreg0_hf6_val30
+Output file     : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l250_ep1_p0_b32_bias1_outreg0_hf6_val30.mat
+X shape         : (629, 9)
+Y shape         : (629, 1)
+OOS start       : 1980-01-31
+Horizon         : 12
+Hyper frequency : 6
+NMC / NAVG      : 100 / 10
+CPU workers     : 20
+------------------------------------------------------------------------
+Model parameters
+{
+  "archi": [
+    1
+  ],
+  "Dropout": 0.0,
+  "l1l2": [
+    0.0,
+    50.0
+  ],
+  "learning_rate": 0.001,
+  "decay_rate": 0.001,
+  "momentum": 0.9,
+  "nesterov": true,
+  "epochs": 1,
+  "patience": 0,
+  "batch_size": 32,
+  "validation_split": 0.3,
+  "purge_size": 12,
+  "shuffle": false,
+  "loss_name": "mse",
+  "huber_delta": 1.0,
+  "use_bias": true,
+  "regularize_output": false
+}
+========================================================================
+
+Total OOS steps: 540
+[   1/540] 1980-01-31 | oos=   1 | refit=True  | val= 14.787948 | best= 14.787948 | R2=[0.7439]
+[  10/540] 1980-10-31 | oos=  10 | refit=False | val=  7.207789 | best=  2.168559 | R2=[0.1339]
+[  20/540] 1981-08-31 | oos=  20 | refit=False | val=  6.370244 | best=  3.471182 | R2=[0.1208]
+[  30/540] 1982-06-30 | oos=  30 | refit=True  | val= 17.356332 | best= 17.356332 | R2=[-0.0474]
+Early abort: R2[0]=-0.047409381576 below 0.000000000000 at step 30.
+
+========================================================================
+Finished
+========================================================================
+Saved to : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l250_ep1_p0_b32_bias1_outreg0_hf6_val30.mat
+R2OOS    : [-0.0474]
+p-values : [0.5738]
+========================================================================
+Candidate R2OOS: [-0.047409381576]
+dy_9 R2OOS     : -0.047409381576
+dy_9 is below target 0.010000000000; continuing to next hyperparameter set.
+
+########################################################################
+Candidate: dy9target_a1_lr0p001_l2100_ep1_p0_b32_bias1_outreg0_hf6_val30
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l2100_ep1_p0_b32_bias1_outreg0_hf6_val30.mat
+########################################################################
+
+========================================================================
+Experiment settings
+========================================================================
+Data path       : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\data\target_and_features.mat
+Feature groups  : ['yoy_fwd']
+Target group    : dy
+Target indices  : [8]
+Model           : NN
+Run tag         : nmc100_navg10_0608_dy9target_a1_lr0p001_l2100_ep1_p0_b32_bias1_outreg0_hf6_val30
+Output file     : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l2100_ep1_p0_b32_bias1_outreg0_hf6_val30.mat
+X shape         : (629, 9)
+Y shape         : (629, 1)
+OOS start       : 1980-01-31
+Horizon         : 12
+Hyper frequency : 6
+NMC / NAVG      : 100 / 10
+CPU workers     : 20
+------------------------------------------------------------------------
+Model parameters
+{
+  "archi": [
+    1
+  ],
+  "Dropout": 0.0,
+  "l1l2": [
+    0.0,
+    100.0
+  ],
+  "learning_rate": 0.001,
+  "decay_rate": 0.001,
+  "momentum": 0.9,
+  "nesterov": true,
+  "epochs": 1,
+  "patience": 0,
+  "batch_size": 32,
+  "validation_split": 0.3,
+  "purge_size": 12,
+  "shuffle": false,
+  "loss_name": "mse",
+  "huber_delta": 1.0,
+  "use_bias": true,
+  "regularize_output": false
+}
+========================================================================
+
+Total OOS steps: 540
+[   1/540] 1980-01-31 | oos=   1 | refit=True  | val=  5.321808 | best=  5.321808 | R2=[0.0989]
+[  10/540] 1980-10-31 | oos=  10 | refit=False | val=  2.142923 | best=  1.890084 | R2=[0.0291]
+[  20/540] 1981-08-31 | oos=  20 | refit=False | val= 16.134357 | best=  6.752041 | R2=[0.0274]
+[  30/540] 1982-06-30 | oos=  30 | refit=True  | val=  7.682651 | best=  7.682651 | R2=[-0.0482]
+Early abort: R2[0]=-0.048177672160 below 0.000000000000 at step 30.
+
+========================================================================
+Finished
+========================================================================
+Saved to : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l2100_ep1_p0_b32_bias1_outreg0_hf6_val30.mat
+R2OOS    : [-0.0482]
+p-values : [0.7713]
+========================================================================
+Candidate R2OOS: [-0.04817767216]
+dy_9 R2OOS     : -0.048177672160
+dy_9 is below target 0.010000000000; continuing to next hyperparameter set.
+
+########################################################################
+Candidate: dy9target_a1_lr0p001_l250_ep1_p0_b32_bias1_outreg0_hf6_huber0p5
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l250_ep1_p0_b32_bias1_outreg0_hf6_huber0p5.mat
+########################################################################
+
+========================================================================
+Experiment settings
+========================================================================
+Data path       : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\data\target_and_features.mat
+Feature groups  : ['yoy_fwd']
+Target group    : dy
+Target indices  : [8]
+Model           : NN
+Run tag         : nmc100_navg10_0608_dy9target_a1_lr0p001_l250_ep1_p0_b32_bias1_outreg0_hf6_huber0p5
+Output file     : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l250_ep1_p0_b32_bias1_outreg0_hf6_huber0p5.mat
+X shape         : (629, 9)
+Y shape         : (629, 1)
+OOS start       : 1980-01-31
+Horizon         : 12
+Hyper frequency : 6
+NMC / NAVG      : 100 / 10
+CPU workers     : 20
+------------------------------------------------------------------------
+Model parameters
+{
+  "archi": [
+    1
+  ],
+  "Dropout": 0.0,
+  "l1l2": [
+    0.0,
+    50.0
+  ],
+  "learning_rate": 0.001,
+  "decay_rate": 0.001,
+  "momentum": 0.9,
+  "nesterov": true,
+  "epochs": 1,
+  "patience": 0,
+  "batch_size": 32,
+  "validation_split": 0.15,
+  "purge_size": 12,
+  "shuffle": false,
+  "loss_name": "huber",
+  "huber_delta": 0.5,
+  "use_bias": true,
+  "regularize_output": false
+}
+========================================================================
+
+Total OOS steps: 540
+[   1/540] 1980-01-31 | oos=   1 | refit=True  | val= 13.706896 | best= 13.706896 | R2=[0.3574]
+[  10/540] 1980-10-31 | oos=  10 | refit=False | val=  5.974259 | best=  1.294807 | R2=[0.082]
+[  20/540] 1981-08-31 | oos=  20 | refit=False | val=  7.852856 | best=  4.152144 | R2=[0.089]
+[  30/540] 1982-06-30 | oos=  30 | refit=True  | val=  5.126200 | best=  5.126200 | R2=[-0.0055]
+Early abort: R2[0]=-0.005541534867 below 0.000000000000 at step 30.
+
+========================================================================
+Finished
+========================================================================
+Saved to : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l250_ep1_p0_b32_bias1_outreg0_hf6_huber0p5.mat
+R2OOS    : [-0.0055]
+p-values : [0.483]
+========================================================================
+Candidate R2OOS: [-0.005541534867]
+dy_9 R2OOS     : -0.005541534867
+dy_9 is below target 0.010000000000; continuing to next hyperparameter set.
+
+########################################################################
+Candidate: dy9target_a1_lr0p001_l2100_ep1_p0_b32_bias1_outreg0_hf6_huber0p5
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l2100_ep1_p0_b32_bias1_outreg0_hf6_huber0p5.mat
+########################################################################
+
+========================================================================
+Experiment settings
+========================================================================
+Data path       : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\data\target_and_features.mat
+Feature groups  : ['yoy_fwd']
+Target group    : dy
+Target indices  : [8]
+Model           : NN
+Run tag         : nmc100_navg10_0608_dy9target_a1_lr0p001_l2100_ep1_p0_b32_bias1_outreg0_hf6_huber0p5
+Output file     : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l2100_ep1_p0_b32_bias1_outreg0_hf6_huber0p5.mat
+X shape         : (629, 9)
+Y shape         : (629, 1)
+OOS start       : 1980-01-31
+Horizon         : 12
+Hyper frequency : 6
+NMC / NAVG      : 100 / 10
+CPU workers     : 20
+------------------------------------------------------------------------
+Model parameters
+{
+  "archi": [
+    1
+  ],
+  "Dropout": 0.0,
+  "l1l2": [
+    0.0,
+    100.0
+  ],
+  "learning_rate": 0.001,
+  "decay_rate": 0.001,
+  "momentum": 0.9,
+  "nesterov": true,
+  "epochs": 1,
+  "patience": 0,
+  "batch_size": 32,
+  "validation_split": 0.15,
+  "purge_size": 12,
+  "shuffle": false,
+  "loss_name": "huber",
+  "huber_delta": 0.5,
+  "use_bias": true,
+  "regularize_output": false
+}
+========================================================================
+
+Total OOS steps: 540
+[   1/540] 1980-01-31 | oos=   1 | refit=True  | val=  4.346858 | best=  4.346858 | R2=[0.147]
+[  10/540] 1980-10-31 | oos=  10 | refit=False | val=  1.197000 | best=  1.025754 | R2=[0.0378]
+[  20/540] 1981-08-31 | oos=  20 | refit=False | val=  1.240139 | best=  1.061717 | R2=[0.0285]
+[  30/540] 1982-06-30 | oos=  30 | refit=False | val=  1.238107 | best=  1.238107 | R2=[-0.0571]
+Early abort: R2[0]=-0.057145712988 below 0.000000000000 at step 30.
+
+========================================================================
+Finished
+========================================================================
+Saved to : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l2100_ep1_p0_b32_bias1_outreg0_hf6_huber0p5.mat
+R2OOS    : [-0.0571]
+p-values : [0.7981]
+========================================================================
+Candidate R2OOS: [-0.057145712988]
+dy_9 R2OOS     : -0.057145712988
+dy_9 is below target 0.010000000000; continuing to next hyperparameter set.
+
+########################################################################
+Candidate: dy9target_a1_lr0p001_l250_ep1_p0_b32_bias1_outreg0_hf3_val30_huber0p5
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l250_ep1_p0_b32_bias1_outreg0_hf3_val30_huber0p5.mat
+########################################################################
+
+========================================================================
+Experiment settings
+========================================================================
+Data path       : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\data\target_and_features.mat
+Feature groups  : ['yoy_fwd']
+Target group    : dy
+Target indices  : [8]
+Model           : NN
+Run tag         : nmc100_navg10_0608_dy9target_a1_lr0p001_l250_ep1_p0_b32_bias1_outreg0_hf3_val30_huber0p5
+Output file     : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l250_ep1_p0_b32_bias1_outreg0_hf3_val30_huber0p5.mat
+X shape         : (629, 9)
+Y shape         : (629, 1)
+OOS start       : 1980-01-31
+Horizon         : 12
+Hyper frequency : 3
+NMC / NAVG      : 100 / 10
+CPU workers     : 20
+------------------------------------------------------------------------
+Model parameters
+{
+  "archi": [
+    1
+  ],
+  "Dropout": 0.0,
+  "l1l2": [
+    0.0,
+    50.0
+  ],
+  "learning_rate": 0.001,
+  "decay_rate": 0.001,
+  "momentum": 0.9,
+  "nesterov": true,
+  "epochs": 1,
+  "patience": 0,
+  "batch_size": 32,
+  "validation_split": 0.3,
+  "purge_size": 12,
+  "shuffle": false,
+  "loss_name": "huber",
+  "huber_delta": 0.5,
+  "use_bias": true,
+  "regularize_output": false
+}
+========================================================================
+
+Total OOS steps: 540
+[   1/540] 1980-01-31 | oos=   1 | refit=True  | val= 13.748963 | best= 13.748963 | R2=[0.3545]
+[  10/540] 1980-10-31 | oos=  10 | refit=False | val=  1.154060 | best=  1.154060 | R2=[0.1095]
+[  20/540] 1981-08-31 | oos=  20 | refit=False | val=  3.874366 | best=  1.437280 | R2=[0.1092]
+[  30/540] 1982-06-30 | oos=  30 | refit=True  | val= 14.140140 | best= 14.140140 | R2=[0.0074]
+[  40/540] 1983-04-30 | oos=  40 | refit=False | val=  4.259859 | best=  4.259859 | R2=[0.0092]
+[  50/540] 1984-02-29 | oos=  50 | refit=False | val=  7.826146 | best=  4.235702 | R2=[0.0198]
+[  60/540] 1984-12-31 | oos=  60 | refit=True  | val=  5.087947 | best=  5.087947 | R2=[0.01]
+[  70/540] 1985-10-31 | oos=  70 | refit=False | val=  3.929483 | best=  3.929483 | R2=[-0.039]
+Early abort: R2[0]=-0.039036511753 below 0.000000000000 at step 70.
+
+========================================================================
+Finished
+========================================================================
+Saved to : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l250_ep1_p0_b32_bias1_outreg0_hf3_val30_huber0p5.mat
+R2OOS    : [-0.039]
+p-values : [0.6736]
+========================================================================
+Candidate R2OOS: [-0.039036511753]
+dy_9 R2OOS     : -0.039036511753
+dy_9 is below target 0.010000000000; continuing to next hyperparameter set.
+
+########################################################################
+Candidate: dy9target_a1_lr0p001_l2100_ep1_p0_b32_bias1_outreg0_hf3_val30_huber0p5
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l2100_ep1_p0_b32_bias1_outreg0_hf3_val30_huber0p5.mat
+########################################################################
+
+========================================================================
+Experiment settings
+========================================================================
+Data path       : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\data\target_and_features.mat
+Feature groups  : ['yoy_fwd']
+Target group    : dy
+Target indices  : [8]
+Model           : NN
+Run tag         : nmc100_navg10_0608_dy9target_a1_lr0p001_l2100_ep1_p0_b32_bias1_outreg0_hf3_val30_huber0p5
+Output file     : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l2100_ep1_p0_b32_bias1_outreg0_hf3_val30_huber0p5.mat
+X shape         : (629, 9)
+Y shape         : (629, 1)
+OOS start       : 1980-01-31
+Horizon         : 12
+Hyper frequency : 3
+NMC / NAVG      : 100 / 10
+CPU workers     : 20
+------------------------------------------------------------------------
+Model parameters
+{
+  "archi": [
+    1
+  ],
+  "Dropout": 0.0,
+  "l1l2": [
+    0.0,
+    100.0
+  ],
+  "learning_rate": 0.001,
+  "decay_rate": 0.001,
+  "momentum": 0.9,
+  "nesterov": true,
+  "epochs": 1,
+  "patience": 0,
+  "batch_size": 32,
+  "validation_split": 0.3,
+  "purge_size": 12,
+  "shuffle": false,
+  "loss_name": "huber",
+  "huber_delta": 0.5,
+  "use_bias": true,
+  "regularize_output": false
+}
+========================================================================
+
+Total OOS steps: 540
+[   1/540] 1980-01-31 | oos=   1 | refit=True  | val=  4.373420 | best=  4.373420 | R2=[0.1476]
+[  10/540] 1980-10-31 | oos=  10 | refit=False | val=  9.247036 | best=  4.494747 | R2=[0.0243]
+[  20/540] 1981-08-31 | oos=  20 | refit=False | val= 13.880242 | best=  4.607681 | R2=[0.041]
+[  30/540] 1982-06-30 | oos=  30 | refit=True  | val=  4.745082 | best=  4.745082 | R2=[-0.003]
+Early abort: R2[0]=-0.003046659206 below 0.000000000000 at step 30.
+
+========================================================================
+Finished
+========================================================================
+Saved to : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l2100_ep1_p0_b32_bias1_outreg0_hf3_val30_huber0p5.mat
+R2OOS    : [-0.003]
+p-values : [0.5033]
+========================================================================
+Candidate R2OOS: [-0.003046659206]
+dy_9 R2OOS     : -0.003046659206
+dy_9 is below target 0.010000000000; continuing to next hyperparameter set.
+
+########################################################################
+Candidate: dy9target_a1_lr0p001_l250_ep1_p0_b32_bias1_outreg0_hf6
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l250_ep1_p0_b32_bias1_outreg0_hf6.mat
+########################################################################
+Existing result found; using saved MAT.
+Candidate R2OOS: [-0.075574839158]
+dy_9 R2OOS     : -0.075574839158
+dy_9 is below target 0.010000000000; continuing to next hyperparameter set.
+
+########################################################################
+Candidate: dy9target_a1_lr0p0005_l2100_ep1_p0_b32_bias1_outreg0_hf6
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p0005_l2100_ep1_p0_b32_bias1_outreg0_hf6.mat
+########################################################################
+
+========================================================================
+Experiment settings
+========================================================================
+Data path       : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\data\target_and_features.mat
+Feature groups  : ['yoy_fwd']
+Target group    : dy
+Target indices  : [8]
+Model           : NN
+Run tag         : nmc100_navg10_0608_dy9target_a1_lr0p0005_l2100_ep1_p0_b32_bias1_outreg0_hf6
+Output file     : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p0005_l2100_ep1_p0_b32_bias1_outreg0_hf6.mat
+X shape         : (629, 9)
+Y shape         : (629, 1)
+OOS start       : 1980-01-31
+Horizon         : 12
+Hyper frequency : 6
+NMC / NAVG      : 100 / 10
+CPU workers     : 20
+------------------------------------------------------------------------
+Model parameters
+{
+  "archi": [
+    1
+  ],
+  "Dropout": 0.0,
+  "l1l2": [
+    0.0,
+    100.0
+  ],
+  "learning_rate": 0.0005,
+  "decay_rate": 0.001,
+  "momentum": 0.9,
+  "nesterov": true,
+  "epochs": 1,
+  "patience": 0,
+  "batch_size": 32,
+  "validation_split": 0.15,
+  "purge_size": 12,
+  "shuffle": false,
+  "loss_name": "mse",
+  "huber_delta": 1.0,
+  "use_bias": true,
+  "regularize_output": false
+}
+========================================================================
+
+Total OOS steps: 540
+[   1/540] 1980-01-31 | oos=   1 | refit=True  | val= 27.952486 | best= 27.952486 | R2=[0.5926]

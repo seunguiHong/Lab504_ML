@@ -168,7 +168,6 @@ def _normalize_params(params):
         "huber_delta": 1.0,
         "n_pcs": 3,
         "pcs": [],
-        "aggregation": "mean",
     }
 
     for key, value in defaults.items():
@@ -242,6 +241,15 @@ def _predict_ols(X, beta):
     X = np.asarray(X, dtype=np.float64)
     X_reg = np.column_stack([np.ones(X.shape[0]), X])
     return (X_reg @ beta).astype(np.float32)
+
+
+def _fit_linear_branch(X_fit, Y_fit, X_val, Y_val, X_test):
+    """Linear (archi=[]) branch shared by NN / pcNN / MacroNN: fit OLS on the
+    prepared fit block, predict the test row, and score validation MSE."""
+    beta = _fit_ols(X_fit, Y_fit)
+    y_pred = _predict_ols(X_test, beta)
+    val_loss = float(np.mean((Y_val - _predict_ols(X_val, beta)) ** 2))
+    return y_pred, val_loss
 
 
 def _fit_pca(X, n_components):
@@ -386,11 +394,7 @@ def _fit_single_nn_model(X, Y, seed, params, dumploc, refit):
     X_fit, X_val, X_test = _scale_fit_val_test(X_fit, X_val, X_test)
 
     if len(params["archi"]) == 0:
-        beta = _fit_ols(X_fit, Y_fit)
-        y_val_pred = _predict_ols(X_val, beta)
-        y_pred = _predict_ols(X_test, beta)
-        val_loss = float(np.mean((Y_val - y_val_pred) ** 2))
-        return y_pred, val_loss
+        return _fit_linear_branch(X_fit, Y_fit, X_val, Y_val, X_test)
 
     return _train_or_load_keras_model(
         X_fit=X_fit,
@@ -425,11 +429,7 @@ def _fit_single_pcnn_model(X, Y, seed, params, dumploc, refit):
     X_fit, X_val, X_test = _scale_fit_val_test(X_fit, X_val, X_test)
 
     if len(params["archi"]) == 0:
-        beta = _fit_ols(X_fit, Y_fit)
-        y_val_pred = _predict_ols(X_val, beta)
-        y_pred = _predict_ols(X_test, beta)
-        val_loss = float(np.mean((Y_val - y_val_pred) ** 2))
-        return y_pred, val_loss
+        return _fit_linear_branch(X_fit, Y_fit, X_val, Y_val, X_test)
 
     return _train_or_load_keras_model(
         X_fit=X_fit,
@@ -669,28 +669,23 @@ def MacroNN(X, Y, no, params=None, refit=None, dumploc=None):
         g_test = X_test[:, boundaries[g]:boundaries[g + 1]]
 
         # Scale each group individually
-        from sklearn.preprocessing import StandardScaler
-        scaler = StandardScaler()
-        g_fit_scaled = scaler.fit_transform(g_fit).astype(np.float32)
-        g_val_scaled = scaler.transform(g_val).astype(np.float32)
-        g_test_scaled = scaler.transform(g_test).astype(np.float32)
+        g_fit_scaled, g_val_scaled, g_test_scaled = _scale_fit_val_test(
+            g_fit, g_val, g_test
+        )
 
         X_fit_list.append(g_fit_scaled)
         X_val_list.append(g_val_scaled)
         X_test_list.append(g_test_scaled)
 
-    # Handle OLS edge-case if archi is empty
+    # Handle OLS edge-case if archi is empty: OLS on concatenated scaled inputs.
     if len(params["archi"]) == 0:
-        # Perform OLS on concatenated scaled inputs
-        X_fit_cat = np.hstack(X_fit_list)
-        X_val_cat = np.hstack(X_val_list)
-        X_test_cat = np.hstack(X_test_list)
-
-        beta = _fit_ols(X_fit_cat, Y_fit)
-        y_val_pred = _predict_ols(X_val_cat, beta)
-        y_pred = _predict_ols(X_test_cat, beta)
-        val_loss = float(np.mean((Y_val - y_val_pred) ** 2))
-        return y_pred, val_loss
+        return _fit_linear_branch(
+            np.hstack(X_fit_list),
+            Y_fit,
+            np.hstack(X_val_list),
+            Y_val,
+            np.hstack(X_test_list),
+        )
 
     # 3. Train unified multibranch model
     return _train_or_load_multibranch_model(

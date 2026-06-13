@@ -52,7 +52,8 @@ ncpus = None
 # ============================================================
 
 # BBT (2021) Group Ensemble Neural Network.
-# Trains one shallow NN per feature group, then averages predictions.
+# Unified multi-branch network: one input branch per feature group, concatenated
+# and trained end-to-end (the output layer learns the group weights).
 model = "MacroNN"
 
 params = {
@@ -73,18 +74,24 @@ params = {
     "shuffle": False,
     "loss_name": "mse",
     "huber_delta": 1.0,
-
-    # Group Ensemble aggregation:
-    # Deprecated – the unified model's output layer now learns optimal weights automatically.
-    # "aggregation": "mean",
 }
 
 # ============================================================
 # Output
 # ============================================================
+#
+# Filename is assembled by Engine.build_out_file from the fields below:
+#   [Panel<X>_]<target>_<model>_<predictor>_<ensembling>_<regularization>[_<suffix>].mat
+# target/model/ensembling/regularization are read from the settings above.
+# Leave out_file = None to use the convention. Set it only to override.
+
+results_root = "results"      # output directory
+panel = "A"                   # Panel A evaluation (oos_start 1989)
+predictor_label = "macro8"    # 8 macro groups + fwd, labelled compactly
+name_suffix = None            # optional tag; None to omit
 
 run_tag = "MacroNN_macro8_dy"
-out_file = "results_v2.0/MacroNN_macro8_dy-v2.mat"
+out_file = None               # -> results/PanelA_rx_MacroNN_macro8_ens20x5_l11l20p5do0p2.mat
 
 # ============================================================
 # Run

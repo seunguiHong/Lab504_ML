@@ -1,0 +1,53 @@
+
+########################################################################
+Candidate: dy9target_a3_lr0p001_l21_ep20_p3
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a3_lr0p001_l21_ep20_p3.mat
+########################################################################
+
+========================================================================
+Experiment settings
+========================================================================
+Data path       : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\data\target_and_features.mat
+Feature groups  : ['yoy_fwd']
+Target group    : dy
+Target indices  : [8]
+Model           : NN
+Run tag         : nmc100_navg10_0608_dy9target_a3_lr0p001_l21_ep20_p3
+Output file     : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a3_lr0p001_l21_ep20_p3.mat
+X shape         : (629, 9)
+Y shape         : (629, 1)
+OOS start       : 1980-01-31
+Horizon         : 12
+Hyper frequency : 60
+NMC / NAVG      : 100 / 10
+CPU workers     : 20
+------------------------------------------------------------------------
+Model parameters
+{
+  "archi": [
+    3
+  ],
+  "Dropout": 0.0,
+  "l1l2": [
+    0.0,
+    1.0
+  ],
+  "learning_rate": 0.001,
+  "decay_rate": 0.001,
+  "momentum": 0.9,
+  "nesterov": true,
+  "epochs": 20,
+  "patience": 3,
+  "batch_size": 32,
+  "validation_split": 0.15,
+  "purge_size": 12,
+  "shuffle": false,
+  "loss_name": "mse",
+  "huber_delta": 1.0,
+  "use_bias": false,
+  "regularize_output": true
+}
+========================================================================
+
+Total OOS steps: 540
+[   1/540] 1980-01-31 | oos=   1 | refit=True  | val=  2.394564 | best=  2.394564 | R2=[-0.274]

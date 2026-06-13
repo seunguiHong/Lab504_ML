@@ -31,6 +31,12 @@ def run(C):
         Y = Y_df.to_numpy(dtype=float)
         dates = pd.DatetimeIndex(X_df.index)
 
+        # Resolve the output path. If the config does not hand-pick out_file,
+        # build a canonical name from the experiment semantics so every run
+        # follows one convention (see build_out_file).
+        if not getattr(C, "out_file", None):
+            C.out_file = build_out_file(C)
+
         ncpus = resolve_ncpus(C)
 
         print_experiment_header(C, X, Y, ncpus)
@@ -768,3 +774,109 @@ def build_save_dict(C, X_df, Y_df, Y_true):
 def save_results_mat(file_path, save_dict):
     ensure_dir(os.path.dirname(file_path) or ".")
     sio.savemat(file_path, save_dict)
+
+
+# Canonical target token: the decomposition target "dy" is reported as "yc"
+# (yield-change / Return-Decomposition), direct returns stay "rx".
+TARGET_TOKEN = {"dy": "yc", "rx": "rx"}
+
+
+def _fmt_num(v):
+    """Compact, filename-safe number: 1.0->'1', 0.5->'0p5', 0.003->'0p003'."""
+    s = "%g" % float(v)
+    return s.replace(".", "p").replace("-", "m")
+
+
+def _model_token(C):
+    """NN with no hidden layer is a linear model -> 'OLS'; otherwise the model
+    name verbatim (NN / pcNN / MacroNN)."""
+    params = C.params if isinstance(C.params, dict) else {}
+    archi = params.get("archi", [])
+    is_linear = (archi is None) or (len(archi) == 0)
+    model = str(C.model)
+    if model == "NN":
+        return "OLS" if is_linear else "NN"
+    return model
+
+
+def _ensembling_token(C):
+    """ens<nmc>x<navg>; a single un-ensembled fit is 'single'."""
+    nmc = int(C.nmc)
+    navg = int(C.navg)
+    if nmc <= 1:
+        return "single"
+    return f"ens{nmc}x{navg}"
+
+
+def _distinct_positive(values):
+    out = []
+    for v in np.asarray(values, dtype=float).ravel():
+        v = float(v)
+        if v > 0 and v not in out:
+            out.append(v)
+    return out
+
+
+def _reg_token(C):
+    """Regularization summary: l1/l2 penalties and dropout. Candidate lists are
+    joined with '-'. 'noreg' when nothing is active."""
+    params = C.params if isinstance(C.params, dict) else {}
+
+    l1l2 = np.asarray(params.get("l1l2", [0.0, 0.0]), dtype=float)
+    if l1l2.ndim == 2:
+        l1_vals, l2_vals = l1l2[:, 0], l1l2[:, 1]
+    else:
+        l1_vals, l2_vals = l1l2[:1], l1l2[1:2]
+
+    l1 = _distinct_positive(l1_vals)
+    l2 = _distinct_positive(l2_vals)
+    do = _distinct_positive(params.get("Dropout", 0.0))
+
+    parts = []
+    if l1:
+        parts.append("l1" + "-".join(_fmt_num(v) for v in l1))
+    if l2:
+        parts.append("l2" + "-".join(_fmt_num(v) for v in l2))
+    if do:
+        parts.append("do" + "-".join(_fmt_num(v) for v in do))
+
+    return "".join(parts) if parts else "noreg"
+
+
+def build_out_file(C):
+    """Assemble a standardized output path from experiment semantics.
+
+    Convention:
+        [Panel<X>_]<target>_<model>_<predictor>_<ensembling>_<regularization>[_<suffix>].mat
+
+        Panel<X>       : from C.panel (e.g. "A", "B"); omitted if unset
+        target         : dy -> yc (Decomp), rx -> rx (Direct)
+        model          : OLS (linear) / NN / pcNN / MacroNN
+        predictor      : C.predictor_label, else feature_groups joined by "_"
+        ensembling     : ens<nmc>x<navg>, or "single"
+        regularization : l1/l2/dropout summary, or "noreg"
+        suffix         : from C.name_suffix (e.g. "oos1980"); omitted if unset
+
+    Output directory is C.results_root (default "results").
+    """
+    results_root = getattr(C, "results_root", None) or "results"
+
+    target = TARGET_TOKEN.get(str(C.target_group), str(C.target_group))
+    predictor = getattr(C, "predictor_label", None) or "_".join(C.feature_groups)
+    panel = getattr(C, "panel", None)
+    suffix = getattr(C, "name_suffix", None)
+
+    parts = []
+    if panel:
+        parts.append(f"Panel{panel}")
+    parts.extend([
+        target,
+        _model_token(C),
+        predictor,
+        _ensembling_token(C),
+        _reg_token(C),
+    ])
+    if suffix:
+        parts.append(str(suffix))
+
+    return os.path.join(results_root, "_".join(parts) + ".mat")

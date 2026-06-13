@@ -1,0 +1,179 @@
+
+########################################################################
+Candidate: dy9target_a1_lr0p003_l220_ep1_p0_b32
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p003_l220_ep1_p0_b32.mat
+########################################################################
+Existing result found; using saved MAT.
+Candidate R2OOS: [-0.000186839141]
+dy_9 R2OOS     : -0.000186839141
+dy_9 is not positive; continuing to next hyperparameter set.
+
+########################################################################
+Candidate: dy9target_a1_lr0p001_l250_ep1_p0_b32
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l250_ep1_p0_b32.mat
+########################################################################
+
+========================================================================
+Experiment settings
+========================================================================
+Data path       : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\data\target_and_features.mat
+Feature groups  : ['yoy_fwd']
+Target group    : dy
+Target indices  : [8]
+Model           : NN
+Run tag         : nmc100_navg10_0608_dy9target_a1_lr0p001_l250_ep1_p0_b32
+Output file     : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l250_ep1_p0_b32.mat
+X shape         : (629, 9)
+Y shape         : (629, 1)
+OOS start       : 1980-01-31
+Horizon         : 12
+Hyper frequency : 60
+NMC / NAVG      : 100 / 10
+CPU workers     : 20
+------------------------------------------------------------------------
+Model parameters
+{
+  "archi": [
+    1
+  ],
+  "Dropout": 0.0,
+  "l1l2": [
+    0.0,
+    50.0
+  ],
+  "learning_rate": 0.001,
+  "decay_rate": 0.001,
+  "momentum": 0.9,
+  "nesterov": true,
+  "epochs": 1,
+  "patience": 0,
+  "batch_size": 32,
+  "validation_split": 0.15,
+  "purge_size": 12,
+  "shuffle": false,
+  "loss_name": "mse",
+  "huber_delta": 1.0,
+  "use_bias": false,
+  "regularize_output": true
+}
+========================================================================
+
+Total OOS steps: 540
+[   1/540] 1980-01-31 | oos=   1 | refit=True  | val= 24.611524 | best= 24.611524 | R2=[-0.1688]
+[  10/540] 1980-10-31 | oos=  10 | refit=False | val=  4.248648 | best=  2.506088 | R2=[-0.0015]
+[  20/540] 1981-08-31 | oos=  20 | refit=False | val=  5.098454 | best=  2.506088 | R2=[-0.0013]
+[  30/540] 1982-06-30 | oos=  30 | refit=False | val=  4.708745 | best=  2.506088 | R2=[-0.0007]
+[  40/540] 1983-04-30 | oos=  40 | refit=False | val=  3.929276 | best=  2.506088 | R2=[-0.0006]
+[  50/540] 1984-02-29 | oos=  50 | refit=False | val=  4.088968 | best=  2.506088 | R2=[-0.0006]
+[  60/540] 1984-12-31 | oos=  60 | refit=True  | val=  2.981629 | best=  2.981629 | R2=[-0.0005]
+[  70/540] 1985-10-31 | oos=  70 | refit=False | val=  2.664928 | best=  1.723343 | R2=[-0.0001]
+[  80/540] 1986-08-31 | oos=  80 | refit=False | val=  5.249777 | best=  1.723343 | R2=[-0.0001]
+[  90/540] 1987-06-30 | oos=  90 | refit=False | val=  5.744007 | best=  1.723343 | R2=[-0.0001]
+[ 100/540] 1988-04-30 | oos= 100 | refit=False | val=  4.437316 | best=  1.723343 | R2=[-0.0001]
+[ 110/540] 1989-02-28 | oos= 110 | refit=False | val=  1.405246 | best=  1.405246 | R2=[-0.0001]
+[ 120/540] 1989-12-31 | oos= 120 | refit=True  | val=  1.728975 | best=  1.728975 | R2=[-0.0001]
+[ 130/540] 1990-10-31 | oos= 130 | refit=False | val=  0.435282 | best=  0.432218 | R2=[-0.0001]
+[ 140/540] 1991-08-31 | oos= 140 | refit=False | val=  0.403215 | best=  0.378836 | R2=[-0.0001]
+[ 150/540] 1992-06-30 | oos= 150 | refit=False | val=  0.444708 | best=  0.378836 | R2=[-0.0001]
+[ 160/540] 1993-04-30 | oos= 160 | refit=False | val=  0.580996 | best=  0.378836 | R2=[-0.0001]
+[ 170/540] 1994-02-28 | oos= 170 | refit=False | val=  0.835858 | best=  0.378836 | R2=[-0.0001]
+[ 180/540] 1994-12-31 | oos= 180 | refit=True  | val= 10.083107 | best= 10.083107 | R2=[-0.0001]
+[ 190/540] 1995-10-31 | oos= 190 | refit=False | val=  1.482752 | best=  1.352958 | R2=[-0.0001]
+[ 200/540] 1996-08-31 | oos= 200 | refit=False | val=  1.630811 | best=  1.352958 | R2=[-0.0001]
+[ 210/540] 1997-06-30 | oos= 210 | refit=False | val=  1.286920 | best=  1.286920 | R2=[-0.0001]
+[ 220/540] 1998-04-30 | oos= 220 | refit=False | val=  1.197052 | best=  1.197052 | R2=[-0.0001]
+[ 230/540] 1999-02-28 | oos= 230 | refit=False | val=  0.872909 | best=  0.872909 | R2=[-0.0001]
+[ 240/540] 1999-12-31 | oos= 240 | refit=False | val=  0.741212 | best=  0.741212 | R2=[-0.0001]
+[ 250/540] 2000-10-31 | oos= 250 | refit=False | val=  0.712916 | best=  0.712916 | R2=[-0.0001]
+[ 260/540] 2001-08-31 | oos= 260 | refit=False | val=  0.875165 | best=  0.712916 | R2=[-0.0001]
+[ 270/540] 2002-06-30 | oos= 270 | refit=False | val=  0.872098 | best=  0.712916 | R2=[-0.0001]
+[ 280/540] 2003-04-30 | oos= 280 | refit=False | val=  0.865256 | best=  0.712916 | R2=[-0.0001]
+[ 290/540] 2004-02-29 | oos= 290 | refit=False | val=  0.876680 | best=  0.712916 | R2=[-0.0001]
+[ 300/540] 2004-12-31 | oos= 300 | refit=False | val=  0.643373 | best=  0.643373 | R2=[-0.0001]
+[ 310/540] 2005-10-31 | oos= 310 | refit=False | val=  0.625449 | best=  0.625449 | R2=[-0.0001]
+[ 320/540] 2006-08-31 | oos= 320 | refit=False | val=  0.520956 | best=  0.499727 | R2=[-0.0001]
+[ 330/540] 2007-06-30 | oos= 330 | refit=False | val=  0.450848 | best=  0.450848 | R2=[-0.0001]
+[ 340/540] 2008-04-30 | oos= 340 | refit=False | val=  0.416567 | best=  0.416567 | R2=[-0.0001]
+[ 350/540] 2009-02-28 | oos= 350 | refit=False | val=  0.318804 | best=  0.274210 | R2=[-0.0001]
+[ 360/540] 2009-12-31 | oos= 360 | refit=True  | val=  3.066964 | best=  3.066964 | R2=[-0.0001]
+[ 370/540] 2010-10-31 | oos= 370 | refit=False | val=  0.406950 | best=  0.352892 | R2=[-0.0001]
+[ 380/540] 2011-08-31 | oos= 380 | refit=False | val=  0.395330 | best=  0.352892 | R2=[-0.0001]
+[ 390/540] 2012-06-30 | oos= 390 | refit=False | val=  0.570612 | best=  0.352892 | R2=[-0.0001]
+[ 400/540] 2013-04-30 | oos= 400 | refit=False | val=  0.597297 | best=  0.352892 | R2=[-0.0001]
+[ 410/540] 2014-02-28 | oos= 410 | refit=False | val=  0.714248 | best=  0.352892 | R2=[-0.0001]
+[ 420/540] 2014-12-31 | oos= 420 | refit=True  | val=  1.520872 | best=  1.520872 | R2=[-0.0001]
+[ 430/540] 2015-10-31 | oos= 430 | refit=False | val=  0.630709 | best=  0.630709 | R2=[-0.0001]
+[ 440/540] 2016-08-31 | oos= 440 | refit=False | val=  0.593391 | best=  0.586442 | R2=[-0.0001]
+[ 450/540] 2017-06-30 | oos= 450 | refit=False | val=  0.546156 | best=  0.544240 | R2=[-0.0001]
+[ 460/540] 2018-04-30 | oos= 460 | refit=False | val=  0.553605 | best=  0.544240 | R2=[-0.0001]
+[ 470/540] 2019-02-28 | oos= 470 | refit=False | val=  0.455870 | best=  0.455870 | R2=[-0.0001]
+[ 480/540] 2019-12-31 | oos= 480 | refit=True  | val=  0.576491 | best=  0.576491 | R2=[-0.0001]
+[ 490/540] 2020-10-31 | oos= 490 | refit=False | val=  0.612888 | best=  0.499719 | R2=[-0.0001]
+[ 500/540] 2021-08-31 | oos= 500 | refit=False | val=  0.584679 | best=  0.499719 | R2=[-0.0001]
+[ 510/540] 2022-06-30 | oos= 510 | refit=False | val=  0.647572 | best=  0.499719 | R2=[-0.0001]
+[ 520/540] 2023-04-30 | oos= 520 | refit=False | val=  1.018647 | best=  0.499719 | R2=[-0.0001]
+[ 530/540] 2024-02-29 | oos= 530 | refit=False | val=  1.049313 | best=  0.499719 | R2=[-0.0001]
+[ 540/540] 2024-12-31 | oos= 540 | refit=True  | val=  1.666306 | best=  1.666306 | R2=[-0.0001]
+
+========================================================================
+Finished
+========================================================================
+Saved to : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a1_lr0p001_l250_ep1_p0_b32.mat
+R2OOS    : [-0.0001]
+p-values : [0.5893]
+========================================================================
+Candidate R2OOS: [-8.56727780858e-05]
+dy_9 R2OOS     : -0.000085672778
+dy_9 is not positive; continuing to next hyperparameter set.
+
+########################################################################
+Candidate: dy9target_a3_lr0p001_l250_ep1_p0_b32
+Output   : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a3_lr0p001_l250_ep1_p0_b32.mat
+########################################################################
+
+========================================================================
+Experiment settings
+========================================================================
+Data path       : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\data\target_and_features.mat
+Feature groups  : ['yoy_fwd']
+Target group    : dy
+Target indices  : [8]
+Model           : NN
+Run tag         : nmc100_navg10_0608_dy9target_a3_lr0p001_l250_ep1_p0_b32
+Output file     : D:\Dropbox\0_Lab_504\Codes\504_ML\NN\results_v2.0_robustness\nmc100_navg10_search_0608\dy9target_a3_lr0p001_l250_ep1_p0_b32.mat
+X shape         : (629, 9)
+Y shape         : (629, 1)
+OOS start       : 1980-01-31
+Horizon         : 12
+Hyper frequency : 60
+NMC / NAVG      : 100 / 10
+CPU workers     : 20
+------------------------------------------------------------------------
+Model parameters
+{
+  "archi": [
+    3
+  ],
+  "Dropout": 0.0,
+  "l1l2": [
+    0.0,
+    50.0
+  ],
+  "learning_rate": 0.001,
+  "decay_rate": 0.001,
+  "momentum": 0.9,
+  "nesterov": true,
+  "epochs": 1,
+  "patience": 0,
+  "batch_size": 32,
+  "validation_split": 0.15,
+  "purge_size": 12,
+  "shuffle": false,
+  "loss_name": "mse",
+  "huber_delta": 1.0,
+  "use_bias": false,
+  "regularize_output": true
+}
+========================================================================
+
+Total OOS steps: 540
