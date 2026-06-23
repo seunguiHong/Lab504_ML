@@ -1,4 +1,4 @@
-function generate_summary_latex(in_mat, out_tex)
+function make_summary_table(in_mat, out_tex)
     % GENERATE_SUMMARY_LATEX Loads yield data, computes summary statistics,
     % and exports a beautiful, publication-quality LaTeX table (booktabs style).
     %
@@ -37,8 +37,7 @@ function generate_summary_latex(in_mat, out_tex)
         end
     end
 
-    fprintf('Loading data from "%s"...
-', in_mat);
+    fprintf('Loading data from "%s"...\n', in_mat);
     data_struct = load(in_mat);
     
     if ~isfield(data_struct, 'X') || ~isfield(data_struct, 'y')
@@ -49,16 +48,26 @@ function generate_summary_latex(in_mat, out_tex)
     y = data_struct.y;
     
     rx_data = y.rx.data;
-    fwd_data = X.fwd.data * 100; 
+    fwd_data = X.fwd.data * 100;
     yoy_fwd_data = X.yoy_fwd.data * 100;
-    
+    dy_data = y.dy.data;   % Carry-Anchored target dy_1..dy_9, already in percent
+
+    % Restrict to the paper sample: August 1971 onward (YYYYMM >= 197108).
+    sample_start = 197108;
+    keep = X.fwd.Time >= sample_start;
+    rx_data = rx_data(keep, :);
+    fwd_data = fwd_data(keep, :);
+    yoy_fwd_data = yoy_fwd_data(keep, :);
+    dy_data = dy_data(keep, :);
+
     % Calculate statistics
     rx_stats = calculate_block_stats(rx_data);
     fwd_stats = calculate_block_stats(fwd_data);
     yoy_fwd_stats = calculate_block_stats(yoy_fwd_data);
-    
+    dy_stats = calculate_block_stats(dy_data);
+
     % Generate LaTeX code
-    latex_code = build_latex_table(rx_stats, fwd_stats, yoy_fwd_stats);
+    latex_code = build_latex_table(rx_stats, fwd_stats, yoy_fwd_stats, dy_stats);
     
     % Print to Command Window
     fprintf('\n================== LaTeX Table Code ==================\n');
@@ -134,7 +143,7 @@ function [skewVal, kurtVal] = my_skew_kurt(x)
     kurtVal = m4 / (m2^2);
 end
 
-function latex = build_latex_table(rx_stats, fwd_stats, yoy_fwd_stats)
+function latex = build_latex_table(rx_stats, fwd_stats, yoy_fwd_stats, dy_stats)
     latex = sprintf('%% Publication-quality Yield Curve Summary Statistics Table\n');
     latex = [latex, sprintf('\\begin{table}[tbp]\n')];
     latex = [latex, sprintf('  \\centering\n')];
@@ -179,7 +188,19 @@ function latex = build_latex_table(rx_stats, fwd_stats, yoy_fwd_stats)
     latex = [latex, format_row('    AR(1)', yoy_fwd_stats.ar1)];
     latex = [latex, format_row('    Skewness', yoy_fwd_stats.skew)];
     latex = [latex, format_row('    Kurtosis', yoy_fwd_stats.kurt)];
-    
+    latex = [latex, sprintf('    \\midrule\n')];
+
+    % Panel D
+    latex = [latex, sprintf('    \\multicolumn{10}{l}{\\textbf{Panel D: Rolled-Maturity Yield-Change Target ($\\Delta y_{t+1}^{(n-1)}$, \\%%)}} \\\\\n')];
+    latex = [latex, sprintf('    \\noalign{\\vskip 2pt}\n')];
+    latex = [latex, format_row('    Mean', dy_stats.mean)];
+    latex = [latex, format_row('    Std. Dev.', dy_stats.std)];
+    latex = [latex, format_row('    Min', dy_stats.min)];
+    latex = [latex, format_row('    Max', dy_stats.max)];
+    latex = [latex, format_row('    AR(1)', dy_stats.ar1)];
+    latex = [latex, format_row('    Skewness', dy_stats.skew)];
+    latex = [latex, format_row('    Kurtosis', dy_stats.kurt)];
+
     latex = [latex, sprintf('    \\bottomrule\n')];
     latex = [latex, sprintf('  \\end{tabular}\n')];
     latex = [latex, sprintf('  \\begin{tablenotes}[flushleft]\n')];
@@ -188,6 +209,7 @@ function latex = build_latex_table(rx_stats, fwd_stats, yoy_fwd_stats)
     latex = [latex, sprintf('    Panel A displays the one-year excess returns ($rx_t^{(n)} = n y_t^{(n)} - (n-1) y_{t+12}^{(n-1)} - y_t^{(1)}$) for annual maturities $n = 2, \\dots, 10$.\n')];
     latex = [latex, sprintf('    Panel B displays the annual forward rates ($f_t^{(n)} = n y_t^{(n)} - (n-1) y_t^{(n-1)}$).\n')];
     latex = [latex, sprintf('    Panel C displays the trailing 12-month change in forward rates ($\\Delta f_t^{(n)} = f_t^{(n)} - f_{t-12}^{(n)}$).\n')];
+    latex = [latex, sprintf('    Panel D displays the rolled-maturity yield-change target ($\\Delta y_{t+1}^{(n-1)} = y_{t+1}^{(n-1)} - y_t^{(n-1)}$), reported under each bond maturity $n$.\n')];
     latex = [latex, sprintf('    All variables are expressed in percentage terms (\\%%). AR(1) represents the first-order autocorrelation coefficient.\n')];
     latex = [latex, sprintf('  \\end{tablenotes}\n')];
     latex = [latex, sprintf('\\end{table}\n')];

@@ -1,4 +1,4 @@
-function generate_adf_latex(in_mat, out_tex)
+function make_adf_table(in_mat, out_tex)
     % GENERATE_ADF_LATEX Performs Augmented Dickey-Fuller (ADF) tests on
     % Forward Rates and YoY changes in Forward Rates, and exports a
     % beautiful, publication-quality LaTeX table.
@@ -39,7 +39,13 @@ function generate_adf_latex(in_mat, out_tex)
     X = data_struct.X;
     fwd_data = X.fwd.data;
     yoy_fwd_data = X.yoy_fwd.data;
-    
+
+    % Restrict to the paper sample: August 1971 onward (YYYYMM >= 197108).
+    sample_start = 197108;
+    keep = X.fwd.Time >= sample_start;
+    fwd_data = fwd_data(keep, :);
+    yoy_fwd_data = yoy_fwd_data(keep, :);
+
     % Check toolbox
     has_toolbox = exist('adftest', 'file') == 2 || exist('adftest', 'file') == 3 || exist('adftest', 'file') == 5;
     if has_toolbox

@@ -1,0 +1,90 @@
+
+========================================================================
+Experiment settings
+========================================================================
+Data path       : data/target_and_features.mat
+Feature groups  : ['macro_output', 'macro_labor', 'macro_housing', 'macro_orders', 'macro_money', 'macro_ratesfx', 'macro_prices', 'macro_stock', 'fwd']
+Target group    : dy
+Target indices  : [8]
+Model           : MacroNN
+Run tag         : MacroNN_macro8_dy
+Output file     : results_macro\PanelA_yc_MacroNN_macro8_ens100x10_l260_dy9_a1_lr0p001_l260_ep1_p12.mat
+X shape         : (641, 130)
+Y shape         : (641, 1)
+OOS start       : 1989-01-31
+Horizon         : 12
+Hyper frequency : 60
+NMC / NAVG      : 100 / 10
+CPU workers     : 2
+------------------------------------------------------------------------
+Model parameters
+{
+  "archi": [
+    1
+  ],
+  "Dropout": 0.0,
+  "l1l2": [
+    0.0,
+    60.0
+  ],
+  "learning_rate": 0.001,
+  "decay_rate": 0.001,
+  "momentum": 0.9,
+  "nesterov": true,
+  "epochs": 1,
+  "patience": 0,
+  "batch_size": 32,
+  "validation_split": 0.15,
+  "purge_size": 12,
+  "shuffle": false,
+  "loss_name": "mse",
+  "huber_delta": 1.0
+}
+========================================================================
+
+Total OOS steps: 432
+[   1/432] 1989-01-31 | oos=   1 | refit=True  | val= 42.065901 | best= 42.065901 | R2=[0.4255]
+[  12/432] 1989-12-31 | oos=  12 | refit=False | val=  0.921902 | best=  0.782715 | R2=[0.299]
+[  24/432] 1990-12-31 | oos=  24 | refit=False | val=  0.432826 | best=  0.432826 | R2=[0.2576]
+[  36/432] 1991-12-31 | oos=  36 | refit=False | val=  0.528820 | best=  0.356068 | R2=[0.211]
+[  48/432] 1992-12-31 | oos=  48 | refit=False | val=  0.590664 | best=  0.356068 | R2=[-0.006]
+[  60/432] 1993-12-31 | oos=  60 | refit=True  | val=139.296039 | best=139.296039 | R2=[0.0327]
+[  72/432] 1994-12-31 | oos=  72 | refit=False | val=  1.475421 | best=  1.130075 | R2=[0.0002]
+[  84/432] 1995-12-31 | oos=  84 | refit=False | val=  1.697518 | best=  1.130075 | R2=[-0.0023]
+[  96/432] 1996-12-31 | oos=  96 | refit=False | val=  1.486042 | best=  1.130075 | R2=[-0.0034]
+[ 108/432] 1997-12-31 | oos= 108 | refit=False | val=  1.203940 | best=  1.130075 | R2=[-0.0178]
+[ 120/432] 1998-12-31 | oos= 120 | refit=False | val=  0.917643 | best=  0.917643 | R2=[-0.0183]
+[ 132/432] 1999-12-31 | oos= 132 | refit=False | val=  0.890844 | best=  0.759977 | R2=[-0.0209]
+[ 144/432] 2000-12-31 | oos= 144 | refit=False | val=  0.747185 | best=  0.716101 | R2=[-0.032]
+[ 156/432] 2001-12-31 | oos= 156 | refit=False | val=  0.892986 | best=  0.716101 | R2=[-0.0273]
+[ 168/432] 2002-12-31 | oos= 168 | refit=False | val=  0.870769 | best=  0.716101 | R2=[-0.0196]
+[ 180/432] 2003-12-31 | oos= 180 | refit=True  | val= 64.874398 | best= 64.874398 | R2=[-0.0142]
+[ 192/432] 2004-12-31 | oos= 192 | refit=False | val=  0.625102 | best=  0.625102 | R2=[-0.0141]
+[ 204/432] 2005-12-31 | oos= 204 | refit=False | val=  0.614458 | best=  0.579292 | R2=[-0.017]
+[ 216/432] 2006-12-31 | oos= 216 | refit=False | val=  0.461313 | best=  0.461313 | R2=[-0.0181]
+[ 228/432] 2007-12-31 | oos= 228 | refit=False | val=  0.423043 | best=  0.423043 | R2=[-0.018]
+[ 240/432] 2008-12-31 | oos= 240 | refit=False | val=  0.309088 | best=  0.299327 | R2=[-0.0158]
+[ 252/432] 2009-12-31 | oos= 252 | refit=False | val=  0.356809 | best=  0.299327 | R2=[-0.0125]
+[ 264/432] 2010-12-31 | oos= 264 | refit=False | val=  0.381471 | best=  0.299327 | R2=[-0.0072]
+[ 276/432] 2011-12-31 | oos= 276 | refit=False | val=  0.398538 | best=  0.299327 | R2=[0.0021]
+[ 288/432] 2012-12-31 | oos= 288 | refit=False | val=  0.529190 | best=  0.299327 | R2=[-0.0028]
+[ 300/432] 2013-12-31 | oos= 300 | refit=True  | val=  0.783648 | best=  0.783648 | R2=[-0.0044]
+[ 312/432] 2014-12-31 | oos= 312 | refit=False | val=  0.631220 | best=  0.627365 | R2=[-0.0025]
+[ 324/432] 2015-12-31 | oos= 324 | refit=False | val=  0.585913 | best=  0.585913 | R2=[-0.0007]
+[ 336/432] 2016-12-31 | oos= 336 | refit=False | val=  0.526377 | best=  0.526377 | R2=[-0.0057]
+[ 348/432] 2017-12-31 | oos= 348 | refit=False | val=  0.525271 | best=  0.522594 | R2=[-0.0112]
+[ 360/432] 2018-12-31 | oos= 360 | refit=True  | val= 13.068029 | best= 13.068029 | R2=[-0.006]
+[ 372/432] 2019-12-31 | oos= 372 | refit=False | val=  0.462603 | best=  0.409285 | R2=[0.0015]
+[ 384/432] 2020-12-31 | oos= 384 | refit=False | val=  0.598165 | best=  0.409285 | R2=[-0.0047]
+[ 396/432] 2021-12-31 | oos= 396 | refit=False | val=  0.567915 | best=  0.409285 | R2=[-0.021]
+[ 408/432] 2022-12-31 | oos= 408 | refit=False | val=  0.938398 | best=  0.409285 | R2=[-0.0273]
+[ 420/432] 2023-12-31 | oos= 420 | refit=True  | val= 18.435186 | best= 18.435186 | R2=[-0.0262]
+[ 432/432] 2024-12-31 | oos= 432 | refit=False | val=  1.025311 | best=  1.024583 | R2=[-0.0269]
+
+========================================================================
+Finished
+========================================================================
+Saved to : results_macro\PanelA_yc_MacroNN_macro8_ens100x10_l260_dy9_a1_lr0p001_l260_ep1_p12.mat
+R2OOS    : [-0.0269]
+p-values : [0.7254]
+========================================================================

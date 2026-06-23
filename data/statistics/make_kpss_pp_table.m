@@ -1,4 +1,4 @@
-function generate_kpss_pp_latex(in_mat, out_tex)
+function make_kpss_pp_table(in_mat, out_tex)
     % GENERATE_KPSS_PP_LATEX Performs Kwiatkowski-Phillips-Schmidt-Shin (KPSS) 
     % and Phillips-Perron (PP) stationarity tests on Forward Rates and 
     % YoY changes in Forward Rates, and exports a beautiful, 
@@ -40,7 +40,13 @@ function generate_kpss_pp_latex(in_mat, out_tex)
     X = data_struct.X;
     fwd_data = X.fwd.data;
     yoy_fwd_data = X.yoy_fwd.data;
-    
+
+    % Restrict to the paper sample: August 1971 onward (YYYYMM >= 197108).
+    sample_start = 197108;
+    keep = X.fwd.Time >= sample_start;
+    fwd_data = fwd_data(keep, :);
+    yoy_fwd_data = yoy_fwd_data(keep, :);
+
     % Check toolbox
     has_kpss = exist('kpsstest', 'file') == 2 || exist('kpsstest', 'file') == 3 || exist('kpsstest', 'file') == 5;
     has_pp = exist('pptest', 'file') == 2 || exist('pptest', 'file') == 3 || exist('pptest', 'file') == 5;

@@ -26,8 +26,8 @@ feature_groups = [
     "fwd"
 ]
 
-target_group = "rx"
-target_indices = None
+target_group = "dy"
+target_indices = [8]
 
 # ============================================================
 # Forecasting design
@@ -41,11 +41,11 @@ hyper_freq = 60
 # Monte Carlo / Ensemble
 # ============================================================
 
-nmc = 20
-navg = 5
+nmc = 100
+navg = 10
 
 # Optional. If None, Engine uses available CPU count.
-ncpus = None
+ncpus = 2
 
 # ============================================================
 # Model
@@ -57,17 +57,17 @@ ncpus = None
 model = "MacroNN"
 
 params = {
-    "archi": [3],
+    "archi": [1],
 
     # Keras NN training parameters (applied to each group NN).
-    "Dropout": [0.0, 0.2],
-    "l1l2": [1, 0.5],
-    "learning_rate": 0.02,
+    "Dropout": 0.0,
+    "l1l2": [0.0, 55.0],
+    "learning_rate": 0.001,
     "decay_rate": 0.001,
     "momentum": 0.9,
     "nesterov": True,
-    "epochs": 500,
-    "patience": 20,
+    "epochs": 1,
+    "patience": 0,
     "batch_size": 32,
     "validation_split": 0.15,
     "purge_size": 12,
@@ -85,13 +85,13 @@ params = {
 # target/model/ensembling/regularization are read from the settings above.
 # Leave out_file = None to use the convention. Set it only to override.
 
-results_root = "results"      # output directory
+results_root = "results_macro" # output directory
 panel = "A"                   # Panel A evaluation (oos_start 1989)
 predictor_label = "macro8"    # 8 macro groups + fwd, labelled compactly
-name_suffix = None            # optional tag; None to omit
+name_suffix = "dy9_a1_lr0p001_l255_ep1_p12" # optional tag; None to omit
 
 run_tag = "MacroNN_macro8_dy"
-out_file = None               # -> results/PanelA_rx_MacroNN_macro8_ens20x5_l11l20p5do0p2.mat
+out_file = None               # -> results_macro/PanelA_yc_MacroNN_macro8_ens100x10_l11l20p5do0p2.mat
 
 # ============================================================
 # Run
